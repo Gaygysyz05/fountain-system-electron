@@ -1,0 +1,146 @@
+"""
+Async rewrite of hardware/artnet_controller.py (EightOutputLEDController).
+
+This module needed the least surgery in the whole codebase: it was already
+framework-agnostic raw-UDP code with no PyQt6 dependency. The only change is
+swapping its private `threading.Thread` fader loop for an `asyncio.Task`, so
+it shares the daemon's single event loop instead of running on its own OS
+thread. UDP sendto() is effectively non-blocking, so no executor is needed.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import socket
+import struct
+
+from app.event_bus import EventBus
+from app.protocol import DeviceStateEvent, HardwareErrorEvent
+
+logger = logging.getLogger("fountain.hardware.artnet")
+
+FADE_FPS_INTERVAL = 1 / 60
+SMOOTH_SPEED = 0.15
+UNIVERSES = range(1, 9)
+
+
+def _clamp_dmx_byte(value: float) -> int:
+    try:
+        return max(0, min(255, int(value)))
+    except (TypeError, ValueError):
+        return 0
+
+
+class AsyncArtNetController:
+    def __init__(self, zone_id: int, target_ip: str, target_port: int, bus: EventBus) -> None:
+        self.zone_id = zone_id
+        self.target_ip = target_ip
+        self.target_port = target_port
+        self.bus = bus
+
+        self._sock: socket.socket | None = None
+        self._sequence = 0
+        self._fader_task: asyncio.Task | None = None
+        self._running = False
+
+        self.current_colors: dict[int, list[float]] = {i: [0.0, 0.0, 0.0] for i in UNIVERSES}
+        self.target_colors: dict[int, list[int]] = {i: [0, 0, 0] for i in UNIVERSES}
+
+    async def connect(self) -> bool:
+        try:
+            self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self._sock.setblocking(False)
+        except OSError as exc:
+            self._publish_error(f"socket create failed: {exc}")
+            return False
+
+        self._running = True
+        self._fader_task = asyncio.create_task(self._fader_loop())
+        return True
+
+    def is_connected(self) -> bool:
+        return self._sock is not None and self._running
+
+    async def disconnect(self) -> None:
+        self._running = False
+        if self._fader_task:
+            self._fader_task.cancel()
+        if self._sock:
+            self._sock.close()
+            self._sock = None
+
+    def update_led(self, led_num: int, r: int, g: int, b: int) -> bool:
+        """Sets a target color; the fader task eases toward it. Non-blocking.
+
+        Clamped to a DMX byte (0-255): nothing upstream validates r/g/b (a
+        scenario event or SET_DEVICE_STATE's `parameters` is an opaque
+        dict), and an out-of-range or non-integer value here doesn't fail
+        loudly -- the fader eases current_colors toward it and eventually
+        reaches it exactly, then _send_current_buffer's `bytes(dmx_data)`
+        raises ValueError deep inside this fire-and-forget _fader_task,
+        killing it silently. That instance would then never send another
+        Art-Net packet until reconnected or the daemon restarts."""
+        if led_num not in self.target_colors:
+            return False
+        self.target_colors[led_num] = [_clamp_dmx_byte(r), _clamp_dmx_byte(g), _clamp_dmx_byte(b)]
+        return True
+
+    def all_off(self) -> None:
+        for i in UNIVERSES:
+            self.target_colors[i] = [0, 0, 0]
+
+    async def _fader_loop(self) -> None:
+        while self._running:
+            changed = False
+            for i in UNIVERSES:
+                current, target = self.current_colors[i], self.target_colors[i]
+                for c in range(3):
+                    diff = target[c] - current[c]
+                    if abs(diff) > 0.5:
+                        step = diff * SMOOTH_SPEED
+                        if abs(step) < 0.5:
+                            step = 0.5 if diff > 0 else -0.5
+                        current[c] += step
+                        changed = True
+                    else:
+                        current[c] = target[c]
+
+            if changed:
+                await self._send_current_buffer()
+
+            await asyncio.sleep(FADE_FPS_INTERVAL)
+
+    async def _send_current_buffer(self) -> None:
+        if not self._sock:
+            return
+        for led_num in UNIVERSES:
+            r, g, b = (int(v) for v in self.current_colors[led_num])
+            dmx_data = ([r, g, b] * 170)[:512]
+            dmx_data += [0] * (512 - len(dmx_data))
+            self._send_artnet_packet(led_num - 1, dmx_data)
+            self.bus.publish(DeviceStateEvent(
+                zone_id=self.zone_id,
+                device_id=f"Z{self.zone_id}_light_{led_num}",
+                device_type="light",
+                state={"r": r, "g": g, "b": b},
+            ))
+
+    def _send_artnet_packet(self, universe: int, dmx_data: list[int]) -> None:
+        try:
+            header = b"Art-Net\x00"
+            header += struct.pack("<H", 0x5000)
+            header += struct.pack(">H", 14)
+            header += struct.pack("B", self._sequence)
+            header += struct.pack("B", 0)
+            header += struct.pack("<H", universe)
+            header += struct.pack(">H", 512)
+            self._sock.sendto(header + bytes(dmx_data), (self.target_ip, self.target_port))
+            self._sequence = (self._sequence + 1) % 256
+        except OSError as exc:
+            self._publish_error(f"Art-Net send failed on universe {universe}: {exc}")
+
+    def _publish_error(self, message: str) -> None:
+        logger.warning("zone %s lights: %s", self.zone_id, message)
+        self.bus.publish(HardwareErrorEvent(
+            zone_id=self.zone_id, subsystem="light", message=message, severity="warning",
+        ))

@@ -1,0 +1,94 @@
+"""Unit tests for ZoneScenarioPlayer's load/seek/play position bookkeeping --
+previously zero coverage, and exactly the kind of subtle off-by-one bug the
+class's own docstrings warn about (see load_project/seek)."""
+from __future__ import annotations
+
+import asyncio
+
+from app.event_bus import EventBus
+from app.zones.models import Event, Project
+from app.zones.scenario_player import ZoneScenarioPlayer
+
+
+def _make_player() -> tuple[ZoneScenarioPlayer, list[Event]]:
+    bus = EventBus()
+    player = ZoneScenarioPlayer(zone_id=1, bus=bus, tick_interval=0.02)
+    received: list[Event] = []
+    player.on_device_event = received.append
+    return player, received
+
+
+async def test_seek_while_stopped_is_not_discarded_by_play() -> None:
+    """A SEEK_ZONE sent while stopped used to get silently wiped the moment
+    Play was pressed, because play() called reset() unconditionally."""
+    player, received = _make_player()
+    project = Project(duration=10.0, events=[
+        Event(time=1.0, device_id="D1", parameters={"on": True}),
+        Event(time=5.0, device_id="D1", parameters={"on": False}),
+    ])
+    player.load_project(project, "s1")
+    await player.seek(4.0)
+
+    await player.play()
+    await asyncio.sleep(0.05)
+    await player.stop()
+
+    # The t=1.0 event is BEFORE the seek target -- must not fire.
+    assert not any(e.time == 1.0 for e in received)
+
+
+async def test_reloading_the_same_scenario_keeps_position() -> None:
+    """load_project() is called on every PLAY_SCENARIO press, not just the
+    first -- reloading the SAME scenario (e.g. an edit was saved since the
+    last play) must not reset playback back to 0."""
+    player, _ = _make_player()
+    project = Project(duration=10.0, events=[])
+    player.load_project(project, "s1")
+    await player.seek(3.0)
+
+    player.load_project(project, "s1")  # same scenario_id again
+
+    assert player.current_position == 3.0
+
+
+async def test_loading_a_different_scenario_resets_to_zero() -> None:
+    """Switching to a genuinely different scenario IS a fresh show and
+    should start at the top, unlike the same-scenario case above."""
+    player, _ = _make_player()
+    project_a = Project(duration=10.0, events=[])
+    player.load_project(project_a, "s1")
+    await player.seek(3.0)
+
+    project_b = Project(duration=20.0, events=[])
+    player.load_project(project_b, "s2")
+
+    assert player.current_position == 0.0
+
+
+async def test_loop_wraps_position_and_replays_events() -> None:
+    """is_looping must actually replay events after wrapping back to 0, not
+    just reset the clock -- reset() clears the dedup cache that would
+    otherwise suppress the identical event on the next lap."""
+    player, received = _make_player()
+    project = Project(duration=0.1, events=[
+        Event(time=0.0, device_id="D1", parameters={"on": True}),
+    ])
+    player.load_project(project, "s1")
+    player.is_looping = True
+    await player.play()
+    await asyncio.sleep(0.35)  # several loop cycles at tick_interval=0.02/duration=0.1
+    await player.stop()
+
+    assert len(received) >= 2  # the t=0 event fired again after each wrap
+
+
+async def test_non_looping_playback_stops_at_duration() -> None:
+    player, _ = _make_player()
+    project = Project(duration=0.05, events=[])
+    player.load_project(project, "s1")
+    await player.play()
+
+    await asyncio.sleep(0.2)
+
+    assert player.is_playing is False
+    assert player.current_position == project.duration

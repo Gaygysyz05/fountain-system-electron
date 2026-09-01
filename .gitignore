@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Runtime/operator data -- machine-specific hardware config (real IPs) and
+# authored show files, not source code. Track individual scenario files by
+# hand (git add -f) if you want specific shows under version control.
+data/
