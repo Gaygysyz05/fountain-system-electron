@@ -17,6 +17,8 @@ import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime
+from uuid import uuid4
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -47,10 +49,62 @@ def get_zone(zone_id: int) -> ZoneRuntime:
     return zones[zone_id]
 
 
+_SCHEDULE_CHECK_INTERVAL_S = 20.0
+
+
+async def _check_schedule() -> None:
+    """Runs every _SCHEDULE_CHECK_INTERVAL_S; a schedule entry fires once
+    the wall clock matches its `time` on a day it's due, tracked via
+    last_fired_date so it can't double-fire within the same matching
+    minute (several checks wide at this interval) -- see
+    ScheduleEntryDto's docstring for why a missed time is skipped, not
+    caught up on, if the daemon was down."""
+    entries = persistence.load_schedule()
+    now = datetime.now()
+    today = now.strftime("%Y-%m-%d")
+    current_time = now.strftime("%H:%M")
+    weekday = now.weekday()  # 0=Monday .. 6=Sunday, matches ScheduleEntryDto.days
+
+    changed = False
+    for entry in entries:
+        if not entry.enabled or entry.time != current_time or entry.last_fired_date == today:
+            continue
+        if entry.days and weekday not in entry.days:
+            continue
+
+        entry.last_fired_date = today  # set before the attempt -- a hardware failure must not retry every 20s
+        changed = True
+        try:
+            zone = get_zone(entry.zone_id)
+            project = persistence.load_scenario(entry.scenario_id)
+            zone.player.load_project(project, entry.scenario_id)
+            await zone.player.play()
+            logger.info("schedule: zone %s playing '%s' (scheduled %s)", entry.zone_id, entry.scenario_id, entry.time)
+            await persistence.append_audit_entry("SCHEDULED_PLAY", entry.zone_id, True, None)
+        except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the rest, or crash this loop
+            logger.exception("scheduled play failed for entry %s (zone %s, scenario '%s')",
+                              entry.id, entry.zone_id, entry.scenario_id)
+            await persistence.append_audit_entry("SCHEDULED_PLAY", entry.zone_id, False, str(exc))
+
+    if changed:
+        await persistence.save_schedule(entries)
+
+
+async def _schedule_loop() -> None:
+    while True:
+        await asyncio.sleep(_SCHEDULE_CHECK_INTERVAL_S)
+        try:
+            await _check_schedule()
+        except Exception:
+            logger.exception("schedule check failed")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await persistence.load_installation(get_zone)
+    schedule_task = asyncio.create_task(_schedule_loop())
     yield
+    schedule_task.cancel()
 
 
 app = FastAPI(title="Fountain Control Daemon", lifespan=lifespan)
@@ -211,6 +265,51 @@ async def delete_scenario(scenario_id: str) -> dict:
     return {"status": "ok", "scenario_id": scenario_id}
 
 
+@app.get("/schedule")
+async def get_schedule() -> list[dict]:
+    return [e.model_dump() for e in persistence.load_schedule()]
+
+
+@app.post("/schedule")
+async def create_schedule_entry(payload: persistence.ScheduleEntryCreateDto) -> dict:
+    entries = persistence.load_schedule()
+    entry = persistence.ScheduleEntryDto(id=str(uuid4()), **payload.model_dump())
+    entries.append(entry)
+    await persistence.save_schedule(entries)
+    return entry.model_dump()
+
+
+@app.put("/schedule/{entry_id}")
+async def update_schedule_entry(entry_id: str, payload: persistence.ScheduleEntryUpdateDto) -> dict:
+    entries = persistence.load_schedule()
+    for i, entry in enumerate(entries):
+        if entry.id == entry_id:
+            # exclude_unset -- a field the client didn't send must keep its
+            # current value, not get reset to the Update DTO's own default
+            # (e.g. omitting `enabled` would otherwise silently re-enable a
+            # disabled entry, since bool defaults to True).
+            updated = entry.model_copy(update=payload.model_dump(exclude_unset=True))
+            entries[i] = updated
+            await persistence.save_schedule(entries)
+            return updated.model_dump()
+    raise HTTPException(status_code=404, detail=f"schedule entry '{entry_id}' not found")
+
+
+@app.delete("/schedule/{entry_id}")
+async def delete_schedule_entry(entry_id: str) -> dict:
+    entries = persistence.load_schedule()
+    remaining = [e for e in entries if e.id != entry_id]
+    if len(remaining) == len(entries):
+        raise HTTPException(status_code=404, detail=f"schedule entry '{entry_id}' not found")
+    await persistence.save_schedule(remaining)
+    return {"status": "ok"}
+
+
+@app.get("/audit")
+async def get_audit_log(limit: int = 200) -> list[dict]:
+    return persistence.read_audit_log(limit=limit)
+
+
 @app.websocket(config.WS_PATH)
 async def ws_endpoint(websocket: WebSocket) -> None:
     # CORS (above) doesn't apply to WebSocket at all, so without this check
@@ -282,6 +381,7 @@ async def _handle_incoming(websocket: WebSocket, raw: str) -> None:
         logger.exception("command %s failed", cmd.command)
         ack = Ack(id=cmd.id, ok=False, error=str(exc))
 
+    await persistence.append_audit_entry(cmd.command, getattr(cmd, "zone_id", None), ack.ok, ack.error)
     await _send_ack(websocket, ack)
 
 

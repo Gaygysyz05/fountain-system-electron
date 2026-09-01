@@ -67,6 +67,7 @@ class AsyncInverterManager:
         host: str,
         port: int,
         bus: EventBus,
+        instance_id: str = "",
         subsystem: Subsystem = "motor",
         max_ramp_rate_hz_per_sec: float = DEFAULT_MAX_RAMP_RATE_HZ_PER_SEC,
     ) -> None:
@@ -74,6 +75,7 @@ class AsyncInverterManager:
         self.host = host
         self.port = port
         self.bus = bus
+        self.instance_id = instance_id
         self.subsystem = subsystem
         self.max_ramp_rate_hz_per_sec = max_ramp_rate_hz_per_sec
 
@@ -97,7 +99,8 @@ class AsyncInverterManager:
 
         self.inverters[slave_id] = AsyncInverterController(
             zone_id=self.zone_id, client=self._client, bus_lock=self._bus_lock,
-            slave_id=slave_id, motor_id=motor_id, bus=self.bus, subsystem=self.subsystem,
+            slave_id=slave_id, motor_id=motor_id, bus=self.bus,
+            instance_id=self.instance_id, subsystem=self.subsystem,
         )
         self._queues[slave_id] = asyncio.Queue(maxsize=1)
         return True

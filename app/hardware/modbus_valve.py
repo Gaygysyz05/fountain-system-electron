@@ -42,6 +42,7 @@ class AsyncValveController:
         slave_id: int,
         total_channels: int,
         bus: EventBus,
+        instance_id: str = "",
         min_toggle_interval: float = 0.25,  # conservative default -- tune to the valve/relay datasheet
         write_timeout: float = 2.0,
     ) -> None:
@@ -51,6 +52,7 @@ class AsyncValveController:
         self.slave_id = slave_id
         self.total_channels = total_channels
         self.bus = bus
+        self.instance_id = instance_id
         self.min_toggle_interval = min_toggle_interval
         self.write_timeout = write_timeout
 
@@ -148,6 +150,8 @@ class AsyncValveController:
                     self.bus.publish(DeviceStateEvent(
                         zone_id=self.zone_id,
                         device_id=f"Z{self.zone_id}_valve_{valve_num}",
+                        instance_id=self.instance_id,
+                        channel=str(valve_num),
                         device_type="valve",
                         state={"on": new_state},
                     ))

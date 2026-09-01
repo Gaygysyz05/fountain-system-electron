@@ -16,7 +16,7 @@ OFF_VALUE = 0x0200
 
 async def make_controller(server: FakeModbusServer, bus: EventBus, total_channels: int = 4) -> AsyncValveController:
     controller = AsyncValveController(
-        zone_id=1, host=server.host, port=server.port, slave_id=1,
+        zone_id=1, host=server.host, port=server.port, slave_id=1, instance_id="rele1",
         total_channels=total_channels, bus=bus, min_toggle_interval=0.0, write_timeout=0.5,
     )
     assert await controller.connect()

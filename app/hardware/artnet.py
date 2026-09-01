@@ -32,11 +32,12 @@ def _clamp_dmx_byte(value: float) -> int:
 
 
 class AsyncArtNetController:
-    def __init__(self, zone_id: int, target_ip: str, target_port: int, bus: EventBus) -> None:
+    def __init__(self, zone_id: int, target_ip: str, target_port: int, bus: EventBus, instance_id: str = "") -> None:
         self.zone_id = zone_id
         self.target_ip = target_ip
         self.target_port = target_port
         self.bus = bus
+        self.instance_id = instance_id
 
         self._sock: socket.socket | None = None
         self._sequence = 0
@@ -121,6 +122,8 @@ class AsyncArtNetController:
             self.bus.publish(DeviceStateEvent(
                 zone_id=self.zone_id,
                 device_id=f"Z{self.zone_id}_light_{led_num}",
+                instance_id=self.instance_id,
+                channel=str(led_num - 1),  # user-facing universe is 0-based, see apply_state's own +1 comment
                 device_type="light",
                 state={"r": r, "g": g, "b": b},
             ))

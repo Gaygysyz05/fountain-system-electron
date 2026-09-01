@@ -25,7 +25,8 @@ class ModbusValveDriver:
         self._total_channels = config.total_channels
         self._controller = AsyncValveController(
             zone_id=zone_id, host=config.host, port=config.port, slave_id=config.slave_id,
-            total_channels=config.total_channels, bus=bus, min_toggle_interval=config.min_toggle_interval,
+            total_channels=config.total_channels, bus=bus, instance_id=instance_id,
+            min_toggle_interval=config.min_toggle_interval,
         )
 
     async def connect(self) -> bool:

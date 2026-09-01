@@ -69,6 +69,7 @@ class AsyncInverterController:
         slave_id: int,
         motor_id: int,
         bus: EventBus,
+        instance_id: str = "",
         subsystem: Subsystem = "motor",
         min_command_interval: float = 0.025,
         timeout: float = 0.5,
@@ -77,6 +78,7 @@ class AsyncInverterController:
         self.slave_id = slave_id
         self.motor_id = motor_id
         self.bus = bus
+        self.instance_id = instance_id
         self.subsystem = subsystem
         self.min_command_interval = min_command_interval
         self.timeout = timeout
@@ -314,6 +316,8 @@ class AsyncInverterController:
             self.bus.publish(DeviceStateEvent(
                 zone_id=self.zone_id,
                 device_id=f"Z{self.zone_id}_{self.subsystem}_{self.motor_id}",
+                instance_id=self.instance_id,
+                channel=str(self.slave_id),
                 device_type=self.subsystem,  # type: ignore[arg-type]
                 state={"frequency": frequency, "bus_voltage": bus_voltage, "current": current, "is_running": is_running},
             ))
@@ -327,6 +331,8 @@ class AsyncInverterController:
         self.bus.publish(DeviceStateEvent(
             zone_id=self.zone_id,
             device_id=f"Z{self.zone_id}_{self.subsystem}_{self.motor_id}",
+            instance_id=self.instance_id,
+            channel=str(self.slave_id),
             device_type=self.subsystem,  # type: ignore[arg-type]
             state={"frequency": self.last_frequency or 0.0, "active": active},
         ))

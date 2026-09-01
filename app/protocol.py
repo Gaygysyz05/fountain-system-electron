@@ -251,10 +251,21 @@ class ZoneStatusEvent(BaseModel):
 
 
 class DeviceStateEvent(BaseModel):
-    """Fine-grained state for the 3D preview: one device's state changed."""
+    """Fine-grained state for the 3D preview and the Devices tab's live
+    status readout: one device's state changed.
+
+    `device_id` is NOT the operator-facing device_id from ADD_DEVICE / the
+    device map -- it's an internal id the low-level controller fabricates
+    from its own addressing (an inverter's sequential motor_id, a valve's
+    channel number), which has no relationship to what the operator named
+    the device. Kept only for logging/uniqueness. `instance_id` + `channel`
+    are what actually correlate to a GET /zones device entry (match on
+    `instance_id` and `channel`) -- use those, not `device_id`."""
     type: Literal["device_event"] = "device_event"
     zone_id: int
     device_id: str
+    instance_id: str
+    channel: str
     device_type: DeviceType
     state: dict  # e.g. {"on": true} / {"frequency": 32.5, "active": true} / {"r":255,"g":0,"b":0}
 

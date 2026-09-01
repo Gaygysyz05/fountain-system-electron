@@ -37,7 +37,7 @@ async def make_controller(server: FakeModbusServer, bus: EventBus) -> tuple[Asyn
 
     controller = AsyncInverterController(
         zone_id=1, client=client, bus_lock=asyncio.Lock(), slave_id=SLAVE_ID,
-        motor_id=1, bus=bus, timeout=0.5, min_command_interval=0.0,
+        motor_id=1, bus=bus, instance_id="inv1", timeout=0.5, min_command_interval=0.0,
     )
     assert await controller.connect()
     return controller, client

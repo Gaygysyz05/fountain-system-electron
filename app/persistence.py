@@ -24,10 +24,12 @@ import json
 import logging
 import os
 import re
+import shutil
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.zone_runtime import ZoneRuntime
 from app.zones.models import Event, Project
@@ -37,8 +39,14 @@ logger = logging.getLogger("fountain.persistence")
 DATA_DIR = Path("data")
 INSTALLATION_FILE = DATA_DIR / "installation.json"
 SCENARIOS_DIR = DATA_DIR / "scenarios"
+SCENARIO_BACKUPS_DIR = SCENARIOS_DIR / ".backups"
+MAX_BACKUPS_PER_SCENARIO = 20
+AUDIT_LOG_FILE = DATA_DIR / "audit.log"
+AUDIT_LOG_MAX_BYTES = 5 * 1024 * 1024
+SCHEDULE_FILE = DATA_DIR / "schedule.json"
 
 _SAFE_SCENARIO_ID = re.compile(r"^[A-Za-z0-9_-]+$")
+_TIME_OF_DAY = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 
 
 def _write_text_atomic(path: Path, content: str, encoding: str = "utf-8") -> None:
@@ -194,14 +202,36 @@ def list_scenarios() -> list[dict]:
     return scenarios
 
 
+def _backup_and_write_scenario(path: Path, scenario_id: str, content: str) -> None:
+    """Snapshots the file being overwritten before it's gone -- a scenario
+    is authored by hand in the timeline UI with no undo across a page
+    reload, and Save has no confirmation step. Lives under SCENARIOS_DIR/
+    .backups/ (not list_scenarios()'s concern: that only globs *.json
+    directly in SCENARIOS_DIR, not this subdirectory) so it moves with the
+    rest of the scenarios folder if that's copied to another machine.
+    Pruned to the last MAX_BACKUPS_PER_SCENARIO -- an operator iterating on
+    a show can save dozens of times in an afternoon, and this is a safety
+    net for "oops", not a full edit history."""
+    if path.exists():
+        backups_dir = SCENARIO_BACKUPS_DIR / scenario_id
+        backups_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        shutil.copy2(path, backups_dir / f"{stamp}.json")
+        stale = sorted(backups_dir.glob("*.json"))[:-MAX_BACKUPS_PER_SCENARIO]
+        for old in stale:
+            old.unlink(missing_ok=True)
+    _write_text_atomic(path, content)
+
+
 async def save_scenario(scenario_id: str, data: ScenarioFileDto) -> None:
     """Async for the same reason as save_installation above -- the timeline
     UI's Save action shouldn't be able to stall a playing show's tick loop
     on disk I/O, even though it's a REST call, not a WS command: both run
     on the very same event loop."""
     SCENARIOS_DIR.mkdir(parents=True, exist_ok=True)
+    path = _scenario_path(scenario_id)
     await asyncio.get_running_loop().run_in_executor(
-        None, _write_text_atomic, _scenario_path(scenario_id), data.model_dump_json(indent=2),
+        None, _backup_and_write_scenario, path, scenario_id, data.model_dump_json(indent=2),
     )
 
 
@@ -263,3 +293,115 @@ def load_scenario(scenario_id: str) -> Project:
         music_file = str(resolve_music_path(music_file))
 
     return Project(duration=data["duration"], events=events, music_file=music_file)
+
+
+# -- audit log ---------------------------------------------------------------
+#
+# There's no login/operator-identity system on this panel -- one shared
+# console, not per-user accounts -- so this can't answer "who". What it does
+# answer is "what happened and when": every command the daemon accepted or
+# rejected, in order, which is exactly what's missing when reconstructing
+# what led up to an incident after the fact. Append-only JSON Lines so a
+# reader only ever needs the last N lines, not to parse one giant array.
+
+
+def _append_audit_entry_sync(line: str) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        if AUDIT_LOG_FILE.exists() and AUDIT_LOG_FILE.stat().st_size > AUDIT_LOG_MAX_BYTES:
+            backup = AUDIT_LOG_FILE.with_suffix(".log.1")
+            backup.unlink(missing_ok=True)
+            AUDIT_LOG_FILE.rename(backup)
+    except OSError as exc:
+        logger.warning("failed to rotate %s: %s", AUDIT_LOG_FILE, exc)
+    with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+
+async def append_audit_entry(command: str, zone_id: int | None, ok: bool, error: str | None) -> None:
+    entry = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "command": command,
+        "zone_id": zone_id,
+        "ok": ok,
+        "error": error,
+    }
+    try:
+        await asyncio.get_running_loop().run_in_executor(None, _append_audit_entry_sync, json.dumps(entry))
+    except OSError as exc:
+        # Same stance as save_installation: a failed audit write must not
+        # take a hardware command down with it.
+        logger.error("failed to write %s: %s", AUDIT_LOG_FILE, exc)
+
+
+def read_audit_log(limit: int = 200) -> list[dict]:
+    """Most recent entries first -- what an operator reviewing an incident
+    wants to see without scrolling."""
+    if not AUDIT_LOG_FILE.exists():
+        return []
+    entries = []
+    for line in AUDIT_LOG_FILE.read_text(encoding="utf-8").splitlines()[-limit:]:
+        try:
+            entries.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    entries.reverse()
+    return entries
+
+
+# -- scheduled playback --------------------------------------------------------
+#
+# One JSON file, not folded into installation.json -- a schedule entry
+# references a zone_id and a scenario_id but isn't itself part of "what's
+# wired to what", and changes on its own independent cadence (an operator
+# tweaking show times, not reconfiguring hardware).
+
+
+class ScheduleEntryDto(BaseModel):
+    id: str
+    zone_id: int
+    scenario_id: str
+    time: str = Field(pattern=_TIME_OF_DAY.pattern)  # "HH:MM", 24h, local time
+    days: list[int] = []  # 0=Monday..6=Sunday; empty = every day
+    enabled: bool = True
+    # "YYYY-MM-DD" local date this entry last actually fired -- the ONLY
+    # thing standing between the scheduler and firing twice in the same
+    # matching minute (it's checked every 20s, so a single HH:MM window is
+    # several checks wide), or worse, firing a show for every minute the
+    # daemon happened to be restarting through. The scheduler only ever
+    # compares against "right now"; it deliberately does not catch up on
+    # a time that was missed while the daemon was down.
+    last_fired_date: Optional[str] = None
+
+
+class ScheduleEntryCreateDto(BaseModel):
+    zone_id: int
+    scenario_id: str
+    time: str = Field(pattern=_TIME_OF_DAY.pattern)
+    days: list[int] = []
+    enabled: bool = True
+
+
+class ScheduleEntryUpdateDto(BaseModel):
+    zone_id: Optional[int] = None
+    scenario_id: Optional[str] = None
+    time: Optional[str] = Field(default=None, pattern=_TIME_OF_DAY.pattern)
+    days: Optional[list[int]] = None
+    enabled: Optional[bool] = None
+
+
+def load_schedule() -> list[ScheduleEntryDto]:
+    if not SCHEDULE_FILE.exists():
+        return []
+    try:
+        payload = json.loads(SCHEDULE_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.error("failed to read %s: %s -- starting with no schedule", SCHEDULE_FILE, exc)
+        return []
+    return [ScheduleEntryDto.model_validate(e) for e in payload]
+
+
+async def save_schedule(entries: list[ScheduleEntryDto]) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    content = json.dumps([e.model_dump() for e in entries], indent=2)
+    await asyncio.get_running_loop().run_in_executor(None, _write_text_atomic, SCHEDULE_FILE, content)

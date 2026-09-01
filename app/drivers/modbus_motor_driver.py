@@ -29,7 +29,7 @@ class ModbusMotorGatewayConfig(BaseModel):
 class ModbusMotorGatewayDriver:
     def __init__(self, zone_id: int, instance_id: str, config: ModbusMotorGatewayConfig, bus: EventBus) -> None:
         self._manager = AsyncInverterManager(
-            zone_id=zone_id, host=config.host, port=config.port, bus=bus,
+            zone_id=zone_id, host=config.host, port=config.port, bus=bus, instance_id=instance_id,
             subsystem="motor", max_ramp_rate_hz_per_sec=config.max_ramp_rate_hz_per_sec,
         )
         self._next_motor_id = 1  # internal bookkeeping id for AsyncInverterManager, distinct from slave_id

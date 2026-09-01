@@ -31,6 +31,7 @@ class ArtNetLightDriver:
     def __init__(self, zone_id: int, instance_id: str, config: ArtNetLightConfig, bus: EventBus) -> None:
         self._controller = AsyncArtNetController(
             zone_id=zone_id, target_ip=config.target_ip, target_port=config.target_port, bus=bus,
+            instance_id=instance_id,
         )
 
     async def connect(self) -> bool:
