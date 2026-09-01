@@ -11,6 +11,20 @@ export interface WaveformPeaks {
   max: Float32Array;
 }
 
+/** Just the track's length in seconds -- same decode as decodeAudioPeaks
+ * below, but the timeline's "Choose music" action only needs this part (to
+ * set the scenario's duration to match), not the full peaks array. */
+export async function decodeAudioDuration(arrayBuffer: ArrayBuffer): Promise<number> {
+  const AudioContextCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+  const audioContext = new AudioContextCtor();
+  try {
+    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+    return audioBuffer.duration;
+  } finally {
+    void audioContext.close();
+  }
+}
+
 /** One min/max pair per output column, downsampled from the raw samples --
  * the standard "peaks" representation for rendering a waveform at a fixed
  * pixel width regardless of how long or high-sample-rate the source is. */

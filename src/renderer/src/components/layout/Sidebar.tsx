@@ -20,6 +20,12 @@ const STATE_COLOR: Record<string, string> = {
  * switching the source of truth here to match what those tabs already use.
  * Live playback state (the colored dot) is still overlaid from zonesStore
  * when available, since that's genuinely live-only information.
+ *
+ * The ONE place a zone gets selected/created now -- the Devices tab used to
+ * keep its own separate zone list right next to this one (same zones,
+ * clicking a row in either one had no effect on the other), which was
+ * exactly as confusing as it sounds. configStore.selectedZoneId is shared,
+ * so picking a zone here is what the Devices tab shows too.
  */
 export function Sidebar({
   collapsed,
@@ -30,16 +36,30 @@ export function Sidebar({
 }): JSX.Element {
   const configuredZones = useConfigStore((s) => s.zones);
   const loadZones = useConfigStore((s) => s.loadZones);
+  const selectedZoneId = useConfigStore((s) => s.selectedZoneId);
+  const selectZone = useConfigStore((s) => s.selectZone);
   const renameZone = useConfigStore((s) => s.renameZone);
   const deleteZone = useConfigStore((s) => s.deleteZone);
   const liveZones = useZonesStore((s) => s.zones);
 
   const [editingZoneId, setEditingZoneId] = useState<number | null>(null);
   const [editName, setEditName] = useState("");
+  const [newZoneId, setNewZoneId] = useState("");
+  const [newZoneName, setNewZoneName] = useState("");
 
   useEffect(() => {
     void loadZones();
   }, [loadZones]);
+
+  function handleAddZone(): void {
+    const id = parseInt(newZoneId, 10);
+    if (Number.isNaN(id)) return;
+    selectZone(id); // the zone is created lazily on the daemon once a driver instance is added to it
+    const name = newZoneName.trim();
+    if (name) void renameZone(id, name); // RENAME_ZONE creates the zone runtime immediately, even with 0 devices -- see zone_runtime.get_zone
+    setNewZoneId("");
+    setNewZoneName("");
+  }
 
   const zoneList = [...configuredZones].sort((a, b) => a.zone_id - b.zone_id);
 
@@ -120,11 +140,21 @@ export function Sidebar({
             }
 
             return (
-              <li key={zone.zone_id} className="group flex items-center gap-xs px-md py-xs text-sm">
-                <span className={`h-2 w-2 shrink-0 rounded-full ${live ? (STATE_COLOR[live.state] ?? "bg-text-disabled") : "bg-text-disabled"}`} />
-                <span className="min-w-0 flex-1 truncate" title={label}>
-                  {label}
-                </span>
+              <li
+                key={zone.zone_id}
+                className={`group flex items-center gap-xs px-md py-xs text-sm ${
+                  zone.zone_id === selectedZoneId ? "bg-bg-surface3" : "hover:bg-bg-surface2"
+                }`}
+              >
+                <button
+                  onClick={() => selectZone(zone.zone_id)}
+                  className="flex min-w-0 flex-1 items-center gap-xs text-left"
+                >
+                  <span className={`h-2 w-2 shrink-0 rounded-full ${live ? (STATE_COLOR[live.state] ?? "bg-text-disabled") : "bg-text-disabled"}`} />
+                  <span className={`min-w-0 flex-1 truncate ${zone.zone_id === selectedZoneId ? "text-text-primary" : ""}`} title={label}>
+                    {label}
+                  </span>
+                </button>
                 <span className="whitespace-nowrap text-xs text-text-muted group-hover:hidden">
                   {live ? live.state : `${zone.devices.length} devices`}
                 </span>
@@ -149,6 +179,32 @@ export function Sidebar({
           })}
         </ul>
       )}
+
+      <div className="flex flex-col gap-xs border-t border-border p-sm">
+        <input
+          type="number"
+          placeholder="Zone ID"
+          value={newZoneId}
+          onChange={(e) => setNewZoneId(e.target.value)}
+          className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+        />
+        <div className="flex gap-xs">
+          <input
+            type="text"
+            placeholder="Name (optional)"
+            value={newZoneName}
+            onChange={(e) => setNewZoneName(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleAddZone()}
+            className="h-input w-0 flex-1 rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+          />
+          <button
+            onClick={handleAddZone}
+            className="h-input shrink-0 rounded-control bg-primary px-sm text-sm text-text-primary hover:bg-primary-hover"
+          >
+            +
+          </button>
+        </div>
+      </div>
     </aside>
   );
 }

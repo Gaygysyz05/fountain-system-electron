@@ -1,4 +1,5 @@
-import { contextBridge, ipcRenderer } from "electron";
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from "electron";
+import type { DaemonStatus } from "../main/index";
 
 // The renderer talks to the daemon directly over `ws://127.0.0.1:8765/ws`
 // using the browser's native WebSocket API -- no IPC bridge needed for that,
@@ -13,4 +14,20 @@ contextBridge.exposeInMainWorld("electron", {
   // select-music-file handler) so picking a track there needs no typed
   // path at all. Resolves to null if the user cancels.
   selectMusicFile: (): Promise<string | null> => ipcRenderer.invoke("select-music-file"),
+
+  // Daemon child-process lifecycle (starting/running/restarting/gave-up) --
+  // see main/index.ts's daemon status block for why this exists. Current
+  // value first (covers a subscriber mounting after the last push), then
+  // live updates.
+  getDaemonStatus: (): Promise<DaemonStatus> => ipcRenderer.invoke("get-daemon-status"),
+  onDaemonStatus: (callback: (status: DaemonStatus) => void): (() => void) => {
+    const listener = (_event: IpcRendererEvent, status: DaemonStatus): void => callback(status);
+    ipcRenderer.on("daemon-status", listener);
+    return () => ipcRenderer.removeListener("daemon-status", listener);
+  },
+
+  // Saves the main process's log ring buffer (daemon stdout/stderr + its
+  // own spawn/restart lifecycle lines) to a file the operator picks via a
+  // native save dialog -- on-site diagnostics without a dev terminal.
+  exportLogs: (): Promise<{ ok: boolean; path?: string; error?: string | null }> => ipcRenderer.invoke("export-logs"),
 });

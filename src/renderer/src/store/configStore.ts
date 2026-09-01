@@ -9,12 +9,19 @@ interface ConfigStore {
   zones: ZoneConfigDto[];
   loading: boolean;
   error: string | null;
+  // Shared across the Sidebar and the Devices tab -- previously the Devices
+  // tab kept its own separate zone list + selection, duplicating the
+  // Sidebar's (same zones, side by side, picking one didn't affect the
+  // other). One selection, one place it lives.
+  selectedZoneId: number | null;
+  selectZone: (zoneId: number | null) => void;
 
   loadDrivers: () => Promise<void>;
   loadZones: () => Promise<void>;
 
   renameZone: (zoneId: number, name: string | null) => Promise<void>;
   deleteZone: (zoneId: number) => Promise<void>;
+  connectZone: (zoneId: number) => Promise<void>;
 
   addDriverInstance: (zoneId: number, instanceId: string, driverType: string, config: Record<string, unknown>) => Promise<void>;
   removeDriverInstance: (zoneId: number, instanceId: string) => Promise<void>;
@@ -41,6 +48,8 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
   zones: [],
   loading: false,
   error: null,
+  selectedZoneId: null,
+  selectZone: (zoneId) => set({ selectedZoneId: zoneId }),
 
   loadDrivers: async () => {
     try {
@@ -55,10 +64,22 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
     set({ loading: true });
     try {
       const zones = await restClient.getZones();
-      set({ zones, loading: false, error: null });
+      set((prev) => ({
+        zones,
+        loading: false,
+        error: null,
+        // First load only -- once an operator has picked a zone, a
+        // background refresh must not silently steal focus back to zone 1.
+        selectedZoneId: prev.selectedZoneId === null && zones.length > 0 ? zones[0].zone_id : prev.selectedZoneId,
+      }));
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : String(err) });
     }
+  },
+
+  connectZone: async (zoneId) => {
+    await useConnectionStore.getState().sendCommand({ command: "CONNECT_ZONE", zone_id: zoneId });
+    await get().loadZones();
   },
 
   renameZone: async (zoneId, name) => {
@@ -68,6 +89,7 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
 
   deleteZone: async (zoneId) => {
     await useConnectionStore.getState().sendCommand({ command: "DELETE_ZONE", zone_id: zoneId });
+    if (get().selectedZoneId === zoneId) set({ selectedZoneId: null });
     await get().loadZones();
   },
 

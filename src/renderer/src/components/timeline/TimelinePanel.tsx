@@ -3,8 +3,10 @@ import { useConfigStore } from "../../store/configStore";
 import { useScenariosStore } from "../../store/scenariosStore";
 import { useTimelineStore } from "../../store/timelineStore";
 import { describeError } from "../../lib/errors";
+import { restClient } from "../../lib/restClient";
 import { resolveDeviceIds } from "../../lib/scenario";
 import { useWheelStep } from "../../lib/useWheelStep";
+import { decodeAudioDuration } from "../../lib/waveform";
 import { DeviceCategoryTabs } from "./DeviceCategoryTabs";
 import { DeviceTablePanel } from "./DeviceTablePanel";
 import { ScenarioDevicePicker } from "./ScenarioDevicePicker";
@@ -196,7 +198,24 @@ export function TimelinePanel(): JSX.Element {
           <button
             onClick={async () => {
               const picked = await window.electron.selectMusicFile();
-              if (picked) setMusicFile(picked);
+              if (!picked) return;
+              setMusicFile(picked);
+              // Picking a track resets duration to match it -- the whole
+              // point of authoring against music, and the previous
+              // duration (often just the "New Scenario" default) had no
+              // relationship to the new track anyway. Still a plain
+              // editable field afterward, same as typing a number by hand.
+              try {
+                const bytes = await (await fetch(restClient.audioUrl(picked))).arrayBuffer();
+                const duration = await decodeAudioDuration(bytes);
+                if (duration > 0) setDuration(Math.round(duration * 100) / 100);
+              } catch (err) {
+                // Duration sync is a convenience, not a requirement -- an
+                // unreadable/unsupported file still gets selected as the
+                // music_file, the operator just types the duration by hand
+                // like before this existed.
+                console.warn("could not decode music duration:", err);
+              }
             }}
             title={file.music_file ?? "No music selected"}
             className={`${fieldClass} flex max-w-56 items-center gap-xs px-sm hover:bg-bg-surface2`}

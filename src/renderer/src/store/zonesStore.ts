@@ -21,11 +21,19 @@ interface ZonesStore {
   // and lib/livePosition.ts). Read live position from `zonePositions`
   // there, never from here.
   zones: Map<number, ZoneStatusEvent>;
+  // key: `${zone_id}:${instance_id}:${channel}` -- matches a ZoneConfigDto
+  // device's (instance_id, channel), NOT its device_id (see
+  // DeviceStateEvent's own doc comment for why not). Look this key up with
+  // deviceStateKey() below rather than building the string inline.
   devices: Map<string, DeviceStateEvent>;
   connections: Map<string, ConnectionStateEvent>; // key: `${zone_id}:${subsystem}`
   recentErrors: HardwareErrorEvent[];
 
   applyEvent: (event: DaemonEvent) => void;
+}
+
+export function deviceStateKey(zoneId: number, instanceId: string, channel: string): string {
+  return `${zoneId}:${instanceId}:${channel}`;
 }
 
 export const useZonesStore = create<ZonesStore>((set) => ({
@@ -49,7 +57,7 @@ export const useZonesStore = create<ZonesStore>((set) => ({
         }
         case "device_event": {
           const devices = new Map(prev.devices);
-          devices.set(event.device_id, event);
+          devices.set(deviceStateKey(event.zone_id, event.instance_id, event.channel), event);
           return { devices };
         }
         case "connection_state": {

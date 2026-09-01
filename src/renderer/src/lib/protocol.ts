@@ -192,7 +192,13 @@ export interface ZoneStatusEvent {
 export interface DeviceStateEvent {
   type: "device_event";
   zone_id: number;
+  /** NOT the operator-facing device_id from GET /zones -- an internal id
+   * the daemon's low-level controller fabricates from its own addressing
+   * (see app/protocol.py's DeviceStateEvent docstring). Use `instance_id` +
+   * `channel` to correlate against a ZoneConfigDto device entry instead. */
   device_id: string;
+  instance_id: string;
+  channel: string;
   device_type: DeviceType;
   state: Record<string, unknown>;
 }
@@ -285,4 +291,39 @@ export interface ScenarioDto {
   scenario_id: string;
   name: string;
   duration: number;
+}
+
+// -- REST: /schedule -----------------------------------------------------------
+
+/** Matches app/persistence.py's ScheduleEntryDto. `time` is "HH:MM" 24h
+ * local time; `days` is 0=Monday..6=Sunday, empty = every day. */
+export interface ScheduleEntryDto {
+  id: string;
+  zone_id: number;
+  scenario_id: string;
+  time: string;
+  days: number[];
+  enabled: boolean;
+  last_fired_date: string | null;
+}
+
+export interface ScheduleEntryInput {
+  zone_id: number;
+  scenario_id: string;
+  time: string;
+  days: number[];
+  enabled: boolean;
+}
+
+// -- REST: GET /audit -----------------------------------------------------------
+
+/** Matches app/persistence.py's audit log entry shape -- what command ran,
+ * when, and whether it succeeded. There's no operator-identity system on
+ * this single shared panel, so this answers "what happened", not "who". */
+export interface AuditLogEntryDto {
+  ts: string;
+  command: string;
+  zone_id: number | null;
+  ok: boolean;
+  error: string | null;
 }

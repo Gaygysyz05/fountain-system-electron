@@ -1,7 +1,25 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { isAbsolute, join, relative, resolve } from "path";
 import { spawn, type ChildProcess } from "child_process";
+import { writeFile } from "fs/promises";
 import { is } from "@electron-toolkit/utils";
+
+// -- log ring buffer -------------------------------------------------------
+//
+// Every [daemon] line already went to console.log/console.error, which is
+// fine for a developer running `electron-vite dev` in a terminal but
+// invisible to an operator on a site panel -- there's no terminal to look
+// at. Kept here (not in the renderer) because the daemon's own stdout/
+// stderr, spawn/restart lifecycle, and any daemon-unreachable state all
+// happen in THIS process; the renderer only ever sees the WS connection
+// drop, not why.
+const MAX_LOG_LINES = 4000;
+const logBuffer: string[] = [];
+
+function logLine(line: string): void {
+  logBuffer.push(`${new Date().toISOString()} ${line}`);
+  if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift();
+}
 
 // One window, no fixed zone/device count baked in anywhere here -- the
 // renderer discovers everything (zones, devices, scenarios) from the daemon
@@ -20,6 +38,12 @@ function createWindow(): void {
     show: false,
     backgroundColor: "#1e1e1e", // avoids a white flash before the renderer paints
     autoHideMenuBar: true,
+    // Fullscreen by default for a packaged build (a dedicated site panel --
+    // no window chrome, nothing for a stray touch/click to hit outside the
+    // app) but not while iterating with `electron-vite dev`, where it would
+    // just get in the way. F11 (below) toggles either way, so a site
+    // install is never actually stuck fullscreen.
+    fullscreen: !is.dev,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
       sandbox: false,
@@ -28,6 +52,17 @@ function createWindow(): void {
 
   mainWindow.on("ready-to-show", () => {
     mainWindow?.show();
+  });
+
+  // F11 toggles fullscreen -- the standard OS convention for "let me out of
+  // this", which a fullscreen kiosk-style panel otherwise has no window
+  // border to grab for. Bound at the webContents level (before-input-event)
+  // rather than a renderer keydown handler so it works regardless of what
+  // element currently has focus.
+  mainWindow.webContents.on("before-input-event", (_event, input) => {
+    if (input.type === "keyDown" && input.key === "F11") {
+      mainWindow?.setFullScreen(!mainWindow.isFullScreen());
+    }
   });
 
   // Keep external links (if any ever appear, e.g. a "docs" link) in the
@@ -78,6 +113,46 @@ const DAEMON_HEALTHY_RESET_DELAY_MS = 30_000;
 let daemonProcess: ChildProcess | null = null;
 let daemonRestartAttempts = 0;
 let shuttingDown = false;
+
+// -- daemon status, surfaced to the renderer --------------------------------
+//
+// Previously this whole lifecycle (starting/restarting/gave-up) only ever
+// went to console.log in this process -- an operator on a site panel just
+// saw the WS connection drop with zero indication of whether it's about to
+// come back on its own, or needs someone to go look at it. Mirrors
+// wsClient.ts's ConnectionStatus pattern on the renderer side: last-known
+// value kept here (getDaemonStatus), plus a push on every change
+// (daemon-status), so a subscriber never has to guess whether it missed one.
+export type DaemonStatus =
+  | { phase: "starting" }
+  | { phase: "running" }
+  | { phase: "restarting"; attempt: number; maxAttempts: number }
+  | { phase: "failed"; maxAttempts: number };
+
+let daemonStatus: DaemonStatus = { phase: "starting" };
+
+function setDaemonStatus(status: DaemonStatus): void {
+  daemonStatus = status;
+  mainWindow?.webContents.send("daemon-status", status);
+}
+
+ipcMain.handle("get-daemon-status", () => daemonStatus);
+
+ipcMain.handle("export-logs", async () => {
+  if (!mainWindow) return { ok: false, error: "no window" };
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: "Export Logs",
+    defaultPath: `fountain-logs-${new Date().toISOString().replace(/[:.]/g, "-")}.txt`,
+    filters: [{ name: "Text", extensions: ["txt"] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, error: null }; // cancelled, not a failure
+  try {
+    await writeFile(result.filePath, logBuffer.join("\n") + "\n", "utf-8");
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+});
 
 function resolveDaemonPaths(): { cwd: string; python: string } {
   // __dirname, not app.getAppPath() -- the latter returns the directory of
@@ -143,24 +218,26 @@ async function startDaemon(): Promise<void> {
   // Someone may have started it by hand (as the operator was told to do
   // before this existed) -- don't spawn a second one fighting for the port.
   if (await isDaemonAlreadyRunning()) {
-    console.log("[daemon] already running (started outside this app) -- not spawning another");
+    logLine("[daemon] already running (started outside this app) -- not spawning another");
+    setDaemonStatus({ phase: "running" });
     return;
   }
 
   const { cwd, python } = resolveDaemonPaths();
-  console.log(`[daemon] starting: ${python} -m app.main (cwd=${cwd})`);
+  logLine(`[daemon] starting: ${python} -m app.main (cwd=${cwd})`);
 
   const proc = spawn(python, ["-m", "app.main"], { cwd, stdio: "pipe" });
   daemonProcess = proc;
 
-  proc.stdout?.on("data", (chunk: Buffer) => console.log(`[daemon] ${chunk.toString().trimEnd()}`));
-  proc.stderr?.on("data", (chunk: Buffer) => console.error(`[daemon] ${chunk.toString().trimEnd()}`));
+  proc.stdout?.on("data", (chunk: Buffer) => logLine(`[daemon] ${chunk.toString().trimEnd()}`));
+  proc.stderr?.on("data", (chunk: Buffer) => logLine(`[daemon] ${chunk.toString().trimEnd()}`));
 
   proc.on("error", (err) => {
-    console.error("[daemon] failed to start:", err.message);
+    logLine(`[daemon] failed to start: ${err.message}`);
   });
 
   proc.on("spawn", () => {
+    setDaemonStatus({ phase: "running" });
     // Ran long enough to count as healthy -- forgive earlier restart attempts
     // so a rare crash after hours of uptime doesn't inherit an old backoff streak.
     const resetTimer = setTimeout(() => {
@@ -170,18 +247,20 @@ async function startDaemon(): Promise<void> {
   });
 
   proc.on("exit", (code) => {
-    console.log(`[daemon] exited with code ${code}`);
+    logLine(`[daemon] exited with code ${code}`);
     daemonProcess = null;
     if (shuttingDown) return;
 
     daemonRestartAttempts += 1;
     if (daemonRestartAttempts > MAX_DAEMON_RESTART_ATTEMPTS) {
-      console.error(
+      logLine(
         `[daemon] gave up after ${MAX_DAEMON_RESTART_ATTEMPTS} restart attempts -- ` +
           `run it manually (${python} -m app.main in ${cwd}) to see the actual error`,
       );
+      setDaemonStatus({ phase: "failed", maxAttempts: MAX_DAEMON_RESTART_ATTEMPTS });
       return;
     }
+    setDaemonStatus({ phase: "restarting", attempt: daemonRestartAttempts, maxAttempts: MAX_DAEMON_RESTART_ATTEMPTS });
     const delay = Math.min(1000 * 2 ** daemonRestartAttempts, 15_000);
     setTimeout(() => void startDaemon(), delay);
   });
@@ -194,8 +273,18 @@ function stopDaemon(): void {
   }
 }
 
+// Packaged build only -- never touch the developer's own login items while
+// iterating via `electron-vite dev`. A power flicker or a Windows Update
+// reboot on the site PC would otherwise leave the fountain control panel
+// closed until someone walks over and starts it by hand.
+function configureAutoLaunch(): void {
+  if (is.dev) return;
+  app.setLoginItemSettings({ openAtLogin: true, path: process.execPath });
+}
+
 void app.whenReady().then(() => {
   createWindow();
+  configureAutoLaunch();
   void startDaemon();
 
   app.on("activate", () => {

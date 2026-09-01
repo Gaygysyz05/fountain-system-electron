@@ -1,4 +1,4 @@
-import type { DriverDescriptorDto, ScenarioDto, ZoneConfigDto } from "./protocol";
+import type { AuditLogEntryDto, DriverDescriptorDto, ScenarioDto, ScheduleEntryDto, ScheduleEntryInput, ZoneConfigDto } from "./protocol";
 import type { ScenarioFile } from "./scenario";
 
 export const DAEMON_HTTP_URL = "http://127.0.0.1:8765";
@@ -25,6 +25,21 @@ async function getJson<T>(path: string): Promise<T> {
   const res = await fetch(`${DAEMON_HTTP_URL}${path}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`GET ${path} failed: ${await describeHttpError(res)}`);
   return res.json() as Promise<T>;
+}
+
+async function sendJson<T>(path: string, method: "POST" | "PUT", body: unknown): Promise<T> {
+  const res = await fetch(`${DAEMON_HTTP_URL}${path}`, {
+    method,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`${method} ${path} failed: ${await describeHttpError(res)}`);
+  return res.json() as Promise<T>;
+}
+
+async function deleteRequest(path: string): Promise<void> {
+  const res = await fetch(`${DAEMON_HTTP_URL}${path}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`DELETE ${path} failed: ${await describeHttpError(res)}`);
 }
 
 interface ScenarioFileWire {
@@ -76,4 +91,12 @@ export const restClient = {
     const res = await fetch(`${DAEMON_HTTP_URL}/scenarios/${encodeURIComponent(scenarioId)}`, { method: "DELETE" });
     if (!res.ok) throw new Error(`Delete failed: ${await describeHttpError(res)}`);
   },
+
+  getSchedule: () => getJson<ScheduleEntryDto[]>("/schedule"),
+  createScheduleEntry: (input: ScheduleEntryInput) => sendJson<ScheduleEntryDto>("/schedule", "POST", input),
+  updateScheduleEntry: (entryId: string, input: Partial<ScheduleEntryInput>) =>
+    sendJson<ScheduleEntryDto>(`/schedule/${encodeURIComponent(entryId)}`, "PUT", input),
+  deleteScheduleEntry: (entryId: string) => deleteRequest(`/schedule/${encodeURIComponent(entryId)}`),
+
+  getAuditLog: (limit = 200) => getJson<AuditLogEntryDto[]>(`/audit?limit=${limit}`),
 };

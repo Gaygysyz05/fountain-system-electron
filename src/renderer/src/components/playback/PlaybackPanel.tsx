@@ -55,6 +55,11 @@ export function PlaybackPanel(): JSX.Element {
   const [timelineLoop, setTimelineLoop] = useState(false);
   const [tab, setTab] = useState<Tab>("controls");
 
+  // Lifted out of ZoneControlCard (was local state there) so "Play All" can
+  // read every zone's current pick -- each zone's own selector still writes
+  // here, nothing changes about how picking a scenario per-zone feels.
+  const [selectedScenarios, setSelectedScenarios] = useState<Record<number, string>>({});
+
   useEffect(() => {
     void loadZones();
     void loadScenarios();
@@ -68,11 +73,41 @@ export function PlaybackPanel(): JSX.Element {
     if (!timelineScenarioId && scenarios.length > 0) setTimelineScenarioId(scenarios[0].scenario_id);
   }, [scenarios, timelineScenarioId]);
 
+  // Default every zone to the first available scenario, same as each card
+  // used to do for itself -- only fills in zones that don't have a pick yet.
+  useEffect(() => {
+    if (scenarios.length === 0 || zones.length === 0) return;
+    setSelectedScenarios((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const zone of zones) {
+        if (!next[zone.zone_id]) {
+          next[zone.zone_id] = scenarios[0].scenario_id;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [zones, scenarios]);
+
   const timelineZoneStatus = useZonesStore((s) => (timelineZoneId !== null ? s.zones.get(timelineZoneId) : undefined));
   const timelineState = timelineZoneStatus?.state ?? "stopped";
   const timelineScenario = scenarios.find((s) => s.scenario_id === timelineScenarioId) ?? null;
   const timelineZone = zones.find((z) => z.zone_id === timelineZoneId) ?? null;
   const sendCommand = useConnectionStore((s) => s.sendCommand);
+
+  /** Starts every configured zone's currently-selected scenario at once --
+   * previously the only way to run more than one zone was clicking Play on
+   * each zone's card in turn, which a synced multi-zone show can't really
+   * tolerate (each zone's Play command lands at a slightly different
+   * moment). Skips a zone with nothing selected rather than failing the
+   * whole batch over it. */
+  function playAllZones(): void {
+    for (const zone of zones) {
+      const scenarioId = selectedScenarios[zone.zone_id];
+      if (scenarioId) void sendCommand({ command: "PLAY_SCENARIO", zone_id: zone.zone_id, scenario_id: scenarioId });
+    }
+  }
 
   function toggleTimelineLoop(): void {
     if (timelineZoneId === null) return;
@@ -108,6 +143,16 @@ export function PlaybackPanel(): JSX.Element {
           )}
         </div>
 
+        {tab === "controls" && zones.length > 1 && (
+          <button
+            onClick={playAllZones}
+            title="Starts every zone's currently-selected scenario at once, instead of pressing Play on each card in turn"
+            className="mb-sm h-control rounded-control bg-primary px-md text-sm font-medium text-text-primary hover:bg-primary-hover"
+          >
+            ▶ Play All
+          </button>
+        )}
+
         {tab === "timeline" && timelineZoneId !== null && (
           <span className={`mb-sm rounded-control px-md py-1 text-sm font-medium ${STATE_BADGE[timelineState]}`}>
             {STATE_LABEL[timelineState]}
@@ -121,7 +166,13 @@ export function PlaybackPanel(): JSX.Element {
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto bg-bg-base p-lg">
           <div className="mx-auto grid w-full max-w-5xl grid-cols-1 gap-lg py-lg lg:grid-cols-2">
             {zones.map((zone) => (
-              <ZoneControlCard key={zone.zone_id} zone={zone} scenarios={scenarios} />
+              <ZoneControlCard
+                key={zone.zone_id}
+                zone={zone}
+                scenarios={scenarios}
+                selectedScenarioId={selectedScenarios[zone.zone_id] ?? ""}
+                onSelectScenario={(scenarioId) => setSelectedScenarios((prev) => ({ ...prev, [zone.zone_id]: scenarioId }))}
+              />
             ))}
           </div>
         </div>
@@ -144,18 +195,25 @@ export function PlaybackPanel(): JSX.Element {
   );
 }
 
-/** One zone's whole transport, fully self-contained -- its own scenario
- * selection and loop toggle, so it never fights another zone's card for
- * shared state. Rendered once per configured zone in the Controls grid,
- * every one independently playable at the same time. */
-function ZoneControlCard({ zone, scenarios }: { zone: ZoneConfigDto; scenarios: ScenarioDto[] }): JSX.Element {
-  const [selectedScenarioId, setSelectedScenarioId] = useState<string>("");
+/** One zone's whole transport -- its own loop toggle, so it never fights
+ * another zone's card for shared state, but scenario selection is lifted
+ * to PlaybackPanel (selectedScenarioId/onSelectScenario) so "Play All"
+ * there can see every zone's current pick. Rendered once per configured
+ * zone in the Controls grid, every one independently playable at the same
+ * time -- or all together via Play All. */
+function ZoneControlCard({
+  zone,
+  scenarios,
+  selectedScenarioId,
+  onSelectScenario,
+}: {
+  zone: ZoneConfigDto;
+  scenarios: ScenarioDto[];
+  selectedScenarioId: string;
+  onSelectScenario: (scenarioId: string) => void;
+}): JSX.Element {
   const [loopEnabled, setLoopEnabled] = useState(false);
   const sendCommand = useConnectionStore((s) => s.sendCommand);
-
-  useEffect(() => {
-    if (!selectedScenarioId && scenarios.length > 0) setSelectedScenarioId(scenarios[0].scenario_id);
-  }, [scenarios, selectedScenarioId]);
 
   const zoneStatus = useZonesStore((s) => s.zones.get(zone.zone_id));
   const state = zoneStatus?.state ?? "stopped";
@@ -202,7 +260,7 @@ function ZoneControlCard({ zone, scenarios }: { zone: ZoneConfigDto; scenarios: 
 
       <select
         value={selectedScenarioId}
-        onChange={(e) => setSelectedScenarioId(e.target.value)}
+        onChange={(e) => onSelectScenario(e.target.value)}
         className="h-control rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
       >
         {scenarios.length === 0 && <option value="">No scenarios found</option>}

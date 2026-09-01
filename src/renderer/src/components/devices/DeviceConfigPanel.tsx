@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useConfigStore } from "../../store/configStore";
 import { useConnectionStore } from "../../store/connectionStore";
+import { deviceStateKey, useZonesStore } from "../../store/zonesStore";
 import { ChannelGrid } from "./ChannelGrid";
 import { SchemaForm } from "./SchemaForm";
 import type { DeviceType } from "../../lib/protocol";
@@ -22,17 +23,14 @@ export function DeviceConfigPanel(): JSX.Element {
     error,
     loadDrivers,
     loadZones,
-    renameZone,
-    deleteZone,
+    selectedZoneId,
+    connectZone,
     addDriverInstance,
     removeDriverInstance,
     addDevice,
     removeDevice,
   } = useConfigStore();
   const sendCommand = useConnectionStore((s) => s.sendCommand);
-
-  const [selectedZoneId, setSelectedZoneId] = useState<number | null>(null);
-  const [newZoneInput, setNewZoneInput] = useState("");
 
   /** Fire-and-forget from the button's point of view -- a failure surfaces
    * through connectionStore.lastError -> StatusBar, the same place every
@@ -61,169 +59,31 @@ export function DeviceConfigPanel(): JSX.Element {
     void loadZones();
   }, [loadDrivers, loadZones]);
 
-  useEffect(() => {
-    if (selectedZoneId === null && zones.length > 0) setSelectedZoneId(zones[0].zone_id);
-  }, [zones, selectedZoneId]);
-
   const selectedZone = zones.find((z) => z.zone_id === selectedZoneId) ?? null;
 
-  function handleAddZone(): void {
-    const id = parseInt(newZoneInput, 10);
-    if (Number.isNaN(id)) return;
-    setSelectedZoneId(id); // the zone is created lazily on the daemon once a driver instance is added to it
-    setNewZoneInput("");
-  }
-
   return (
-    <div className="flex min-h-0 flex-1">
-      <ZoneList
-        zones={zones}
-        selectedZoneId={selectedZoneId}
-        onSelect={setSelectedZoneId}
-        newZoneInput={newZoneInput}
-        onNewZoneInputChange={setNewZoneInput}
-        onAddZone={handleAddZone}
-        onRenameZone={renameZone}
-        onDeleteZone={async (zoneId) => {
-          await deleteZone(zoneId);
-          if (selectedZoneId === zoneId) setSelectedZoneId(null);
-        }}
-      />
+    <div className="flex min-h-0 flex-1 overflow-y-auto p-lg">
+      {error && <p className="mb-md text-sm text-danger">{error}</p>}
+      {loading && zones.length === 0 && <p className="text-sm text-text-muted">Loading…</p>}
 
-      <div className="flex-1 overflow-y-auto p-lg">
-        {error && <p className="mb-md text-sm text-danger">{error}</p>}
-        {loading && zones.length === 0 && <p className="text-sm text-text-muted">Loading…</p>}
-
-        {selectedZoneId === null ? (
-          <p className="text-sm text-text-muted">Select or create a zone to configure its devices.</p>
-        ) : (
-          <ZoneEditor
-            zoneId={selectedZoneId}
-            zone={selectedZone}
-            drivers={drivers}
-            onAddDriverInstance={addDriverInstance}
-            onRemoveDriverInstance={removeDriverInstance}
-            onAddDevice={addDevice}
-            onRemoveDevice={removeDevice}
-            onResetFault={resetMotorFault}
-            onReconnectInstance={reconnectInstance}
-            onTestDevice={testDevice}
-          />
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ZoneList(props: {
-  zones: import("../../lib/protocol").ZoneConfigDto[];
-  selectedZoneId: number | null;
-  onSelect: (id: number) => void;
-  newZoneInput: string;
-  onNewZoneInputChange: (v: string) => void;
-  onAddZone: () => void;
-  onRenameZone: (zoneId: number, name: string | null) => Promise<void>;
-  onDeleteZone: (zoneId: number) => Promise<void>;
-}): JSX.Element {
-  const [editingZoneId, setEditingZoneId] = useState<number | null>(null);
-  const [editName, setEditName] = useState("");
-
-  function startRename(zone: import("../../lib/protocol").ZoneConfigDto): void {
-    setEditingZoneId(zone.zone_id);
-    setEditName(zone.name ?? "");
-  }
-
-  async function commitRename(zoneId: number): Promise<void> {
-    await props.onRenameZone(zoneId, editName.trim() || null);
-    setEditingZoneId(null);
-  }
-
-  async function handleDelete(zone: import("../../lib/protocol").ZoneConfigDto): Promise<void> {
-    const label = zone.name?.trim() || `Zone ${zone.zone_id}`;
-    const deviceCount = zone.devices.length;
-    const warning = deviceCount > 0 ? ` This removes all ${deviceCount} configured device(s) and driver instance(s) in it.` : "";
-    if (!window.confirm(`Delete "${label}"?${warning} This can't be undone.`)) return;
-    await props.onDeleteZone(zone.zone_id);
-  }
-
-  return (
-    <aside className="flex w-56 shrink-0 flex-col border-r border-border bg-bg-surface1">
-      <div className="border-b border-border px-md py-sm text-xs font-medium uppercase tracking-wide text-text-muted">Zones</div>
-      <ul className="flex-1 overflow-y-auto py-xs">
-        {props.zones.map((zone) => {
-          const label = zone.name?.trim() || `Zone ${zone.zone_id}`;
-
-          if (editingZoneId === zone.zone_id) {
-            return (
-              <li key={zone.zone_id} className="flex items-center gap-xs px-md py-xs">
-                <input
-                  autoFocus
-                  value={editName}
-                  onChange={(e) => setEditName(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void commitRename(zone.zone_id);
-                    if (e.key === "Escape") setEditingZoneId(null);
-                  }}
-                  placeholder={`Zone ${zone.zone_id}`}
-                  className="h-input min-w-0 flex-1 rounded-control border border-accent bg-bg-surface3 px-sm text-sm text-text-primary focus:outline-none"
-                />
-                <button onClick={() => void commitRename(zone.zone_id)} title="Save" className="text-xs text-accent hover:text-accent-hover">
-                  ✓
-                </button>
-                <button onClick={() => setEditingZoneId(null)} title="Cancel" className="text-xs text-text-muted hover:text-text-secondary">
-                  ✕
-                </button>
-              </li>
-            );
-          }
-
-          return (
-            <li key={zone.zone_id} className="group flex items-center">
-              <button
-                onClick={() => props.onSelect(zone.zone_id)}
-                className={`min-w-0 flex-1 truncate px-md py-xs text-left text-sm hover:bg-bg-surface3 ${
-                  zone.zone_id === props.selectedZoneId ? "bg-bg-surface3 text-text-primary" : "text-text-secondary"
-                }`}
-                title={label}
-              >
-                {label}
-              </button>
-              <span className="hidden shrink-0 items-center gap-0.5 pr-xs group-hover:flex">
-                <button
-                  onClick={() => startRename(zone)}
-                  title="Rename zone"
-                  className="flex h-6 w-6 items-center justify-center rounded-control text-sm text-text-muted hover:bg-bg-surface3 hover:text-text-primary"
-                >
-                  ✎
-                </button>
-                <button
-                  onClick={() => void handleDelete(zone)}
-                  title="Delete zone"
-                  className="flex h-6 w-6 items-center justify-center rounded-control text-sm text-text-muted hover:bg-bg-surface3 hover:text-danger"
-                >
-                  🗑
-                </button>
-              </span>
-            </li>
-          );
-        })}
-      </ul>
-      <div className="flex gap-xs border-t border-border p-sm">
-        <input
-          type="number"
-          placeholder="Zone ID"
-          value={props.newZoneInput}
-          onChange={(e) => props.onNewZoneInputChange(e.target.value)}
-          className="h-input w-0 flex-1 rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+      {selectedZoneId === null ? (
+        <p className="text-sm text-text-muted">Select or create a zone in the sidebar to configure its devices.</p>
+      ) : (
+        <ZoneEditor
+          zoneId={selectedZoneId}
+          zone={selectedZone}
+          drivers={drivers}
+          onAddDriverInstance={addDriverInstance}
+          onRemoveDriverInstance={removeDriverInstance}
+          onAddDevice={addDevice}
+          onRemoveDevice={removeDevice}
+          onResetFault={resetMotorFault}
+          onReconnectInstance={reconnectInstance}
+          onTestDevice={testDevice}
+          onConnectAll={() => void connectZone(selectedZoneId)}
         />
-        <button
-          onClick={props.onAddZone}
-          className="h-input shrink-0 rounded-control bg-primary px-sm text-sm text-text-primary hover:bg-primary-hover"
-        >
-          +
-        </button>
-      </div>
-    </aside>
+      )}
+    </div>
   );
 }
 
@@ -238,6 +98,7 @@ function ZoneEditor(props: {
   onResetFault: (zoneId: number, deviceId: string) => void;
   onReconnectInstance: (zoneId: number, instanceId: string) => void;
   onTestDevice: (zoneId: number, deviceId: string, parameters: Record<string, unknown>) => void;
+  onConnectAll: () => void;
 }): JSX.Element {
   const [showAddInstance, setShowAddInstance] = useState(false);
 
@@ -248,12 +109,23 @@ function ZoneEditor(props: {
     <div className="flex flex-col gap-lg">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-medium text-text-primary">{props.zone?.name?.trim() || `Zone ${props.zoneId}`}</h2>
-        <button
-          onClick={() => setShowAddInstance((v) => !v)}
-          className="h-control rounded-control bg-primary px-md text-sm text-text-primary hover:bg-primary-hover"
-        >
-          + Driver instance
-        </button>
+        <div className="flex items-center gap-sm">
+          {instances.length > 1 && (
+            <button
+              onClick={props.onConnectAll}
+              title="(Re)connect every driver instance in this zone at once, instead of one at a time"
+              className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm text-text-primary hover:bg-bg-surface2"
+            >
+              Connect All
+            </button>
+          )}
+          <button
+            onClick={() => setShowAddInstance((v) => !v)}
+            className="h-control rounded-control bg-primary px-md text-sm text-text-primary hover:bg-primary-hover"
+          >
+            + Driver instance
+          </button>
+        </div>
       </div>
 
       {showAddInstance && (
@@ -274,6 +146,7 @@ function ZoneEditor(props: {
       {instances.map((instance) => (
         <InstanceCard
           key={instance.instance_id}
+          zoneId={props.zoneId}
           instance={instance}
           devices={devices.filter((d) => d.instance_id === instance.instance_id)}
           onRemoveInstance={() => props.onRemoveDriverInstance(props.zoneId, instance.instance_id)}
@@ -349,6 +222,7 @@ function AddDriverInstanceForm(props: {
 }
 
 function InstanceCard(props: {
+  zoneId: number;
   instance: import("../../lib/protocol").DriverInstanceDto;
   devices: import("../../lib/protocol").DeviceDto[];
   onRemoveInstance: () => void;
@@ -365,13 +239,6 @@ function InstanceCard(props: {
   // just to confirm a board exists; showing them is an explicit "I need to
   // check/exclude a channel right now" action, not the default view.
   const [channelsHidden, setChannelsHidden] = useState(true);
-  // Repurposes the same channel grid: clicking a chip normally adds/removes
-  // it from the scenario config; in test mode it instead fires the valve
-  // open/closed right now, for hardware verification. Kept as a separate
-  // mode rather than overloading one click, so "which one does this button
-  // do" is never ambiguous on a real fountain.
-  const [valveTestMode, setValveTestMode] = useState(false);
-  const [valveTestingOn, setValveTestingOn] = useState<Set<string>>(new Set());
   // device_id -> currently test-running at some Hz (for the toggle label).
   const [motorTesting, setMotorTesting] = useState<Set<string>>(new Set());
   const [deviceId, setDeviceId] = useState("");
@@ -467,15 +334,6 @@ function InstanceCard(props: {
     setShowAddDevice(true);
   }
 
-  /** Leaving test mode closes anything the test left open -- a valve stuck
-   * "on" from testing, forgotten about, is exactly the kind of thing that
-   * shouldn't be possible to walk away from on a real fountain. */
-  function exitValveTestMode(): void {
-    for (const deviceId of valveTestingOn) props.onTestDevice(deviceId, { on: false });
-    setValveTestingOn(new Set());
-    setValveTestMode(false);
-  }
-
   function toggleMotorTest(deviceId: string): void {
     const nowTesting = !motorTesting.has(deviceId);
     setMotorTesting((prev) => {
@@ -491,7 +349,23 @@ function InstanceCard(props: {
     <div className="rounded-panel border border-border bg-bg-surface1">
       <div className="flex items-center justify-between border-b border-border px-md py-sm">
         <div className="flex items-center gap-sm">
-          <span className={`h-2 w-2 rounded-full ${props.instance.connected ? "bg-success" : "bg-danger"}`} />
+          <span
+            className={`h-2 w-2 rounded-full ${props.instance.connected ? "bg-success" : "bg-danger"}`}
+            title={
+              // Art-Net is UDP -- there is no delivery acknowledgment in the
+              // protocol, so "connected" here can only ever mean "opened a
+              // local socket and is sending", never "the Node8 actually
+              // answered". Said explicitly so the dot isn't read as a real
+              // liveness check the way it genuinely is for Modbus TCP.
+              props.instance.driver_type === "artnet_rgb_light"
+                ? props.instance.connected
+                  ? "Sending -- Art-Net (UDP) has no delivery confirmation, this does not mean the fixture is actually there"
+                  : "Not sending (socket not open)"
+                : props.instance.connected
+                  ? "Connected"
+                  : "Not connected"
+            }
+          />
           <span className="text-sm font-medium text-text-primary">{props.instance.instance_id}</span>
           <span className="text-xs text-text-muted">
             {props.instance.driver_type} · {CATEGORY_LABEL[props.instance.category]}
@@ -517,43 +391,23 @@ function InstanceCard(props: {
           <div className="flex flex-col gap-xs">
             <div className="flex items-center justify-between">
               <span className="text-xs text-text-muted">Channels 1–{totalChannels}</span>
-              <div className="flex items-center gap-md">
-                {!channelsHidden && (
-                  <button
-                    onClick={() => (valveTestMode ? exitValveTestMode() : setValveTestMode(true))}
-                    title="Click a configured channel below to open/close it right now, for hardware verification"
-                    className={`text-xs ${valveTestMode ? "font-medium text-warning" : "text-accent hover:text-accent-hover"}`}
-                  >
-                    {valveTestMode ? "Exit test mode" : "Test mode"}
-                  </button>
-                )}
-                <button
-                  onClick={() => setChannelsHidden((v) => !v)}
-                  className="text-xs text-text-secondary hover:text-text-primary"
-                >
-                  {channelsHidden ? "Show channels" : "Hide"}
-                </button>
-              </div>
+              <button
+                onClick={() => setChannelsHidden((v) => !v)}
+                className="text-xs text-text-secondary hover:text-text-primary"
+              >
+                {channelsHidden ? "Show channels" : "Hide"}
+              </button>
             </div>
             {!channelsHidden && (
               <>
-                <span className={`text-xs ${valveTestMode ? "text-warning" : "text-text-muted"}`}>
-                  {valveTestMode
-                    ? "Test mode: click a channel to open/close it on the real relay right now."
-                    : "Click one to exclude it from scenarios (e.g. a dead relay) or bring it back."}
+                <span className="text-xs text-text-muted">
+                  Click a channel to include it in scenarios (e.g. exclude a dead relay) or bring it back. This
+                  never touches the real relay -- use "Test a channel" below for that.
                 </span>
                 <ChannelGrid
                   items={Array.from({ length: totalChannels }, (_, i) => {
                     const channel = String(i + 1);
                     const device = props.devices.find((d) => d.channel === channel);
-                    if (valveTestMode) {
-                      const testingOn = device ? valveTestingOn.has(device.device_id) : false;
-                      return {
-                        channel,
-                        active: testingOn,
-                        title: device ? `${device.device_id} — click to ${testingOn ? "close" : "open"}` : "no device configured on this channel",
-                      };
-                    }
                     return {
                       channel,
                       active: Boolean(device),
@@ -562,22 +416,11 @@ function InstanceCard(props: {
                   })}
                   onToggle={(channel) => {
                     const device = props.devices.find((d) => d.channel === channel);
-                    if (valveTestMode) {
-                      if (!device) return;
-                      const nowOn = !valveTestingOn.has(device.device_id);
-                      setValveTestingOn((prev) => {
-                        const next = new Set(prev);
-                        if (nowOn) next.add(device.device_id);
-                        else next.delete(device.device_id);
-                        return next;
-                      });
-                      props.onTestDevice(device.device_id, { on: nowOn });
-                      return;
-                    }
                     if (device) props.onRemoveDevice(device.device_id);
                     else props.onAddDevice(`${props.instance.instance_id}-${channel}`, channel);
                   }}
                 />
+                {props.devices.length > 0 && <ValveTestControl devices={props.devices} onTestDevice={props.onTestDevice} />}
               </>
             )}
           </div>
@@ -646,6 +489,7 @@ function InstanceCard(props: {
                         {d.nozzle_group != null && (
                           <span className="text-text-muted"> · Nozzle {d.nozzle_group} Inv{d.nozzle_inverter}</span>
                         )}
+                        {props.instance.category === "motor" && <MotorLiveState zoneId={props.zoneId} instanceId={props.instance.instance_id} channel={d.channel} />}
                       </span>
                       <span className="flex items-center gap-sm">
                         {props.instance.category === "motor" && (
@@ -792,6 +636,104 @@ function InstanceCard(props: {
         )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Firing a real relay used to share its click target with "include this
+ * channel in scenarios" -- a whole-instance "Test mode" toggle changed
+ * what clicking a channel chip DID, and forgetting it was still on meant
+ * a click meant to configure channels instead fired the real relay. This
+ * is a fully separate, explicit action instead: pick a channel, press
+ * Test -- same one-button-per-action shape as a motor's "Test 10Hz" or a
+ * light's "Test color", and the channel grid above always means the same
+ * thing regardless of what's going on down here.
+ */
+function ValveTestControl(props: {
+  devices: import("../../lib/protocol").DeviceDto[];
+  onTestDevice: (deviceId: string, parameters: Record<string, unknown>) => void;
+}): JSX.Element {
+  const sorted = useMemo(() => [...props.devices].sort((a, b) => Number(a.channel) - Number(b.channel)), [props.devices]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState(sorted[0]?.device_id ?? "");
+  const [testingDeviceId, setTestingDeviceId] = useState<string | null>(null);
+  const testingDeviceIdRef = useRef<string | null>(null);
+  testingDeviceIdRef.current = testingDeviceId;
+
+  // A test left running must not survive navigating away from this card
+  // (switching zones, removing the instance) -- same reasoning as the old
+  // exitValveTestMode, just scoped to the one channel this control can
+  // ever have open instead of a whole Set of them.
+  useEffect(() => {
+    return () => {
+      if (testingDeviceIdRef.current) props.onTestDevice(testingDeviceIdRef.current, { on: false });
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only, reads the ref for the latest value
+  }, []);
+
+  function toggle(): void {
+    if (!selectedDeviceId) return;
+    if (testingDeviceId === selectedDeviceId) {
+      props.onTestDevice(selectedDeviceId, { on: false });
+      setTestingDeviceId(null);
+    } else {
+      if (testingDeviceId) props.onTestDevice(testingDeviceId, { on: false }); // switching channels -- close the previous one first
+      props.onTestDevice(selectedDeviceId, { on: true });
+      setTestingDeviceId(selectedDeviceId);
+    }
+  }
+
+  return (
+    <div className="flex items-center gap-xs border-t border-border pt-xs">
+      <span className="text-xs text-text-muted">Test a channel:</span>
+      <select
+        value={selectedDeviceId}
+        onChange={(e) => {
+          if (testingDeviceId) props.onTestDevice(testingDeviceId, { on: false }); // switching selection closes whatever was open
+          setTestingDeviceId(null);
+          setSelectedDeviceId(e.target.value);
+        }}
+        className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-xs text-text-primary focus:border-accent focus:outline-none"
+      >
+        {sorted.map((d) => (
+          <option key={d.device_id} value={d.device_id}>
+            Channel {d.channel} — {d.device_id}
+          </option>
+        ))}
+      </select>
+      <button
+        onClick={toggle}
+        title="Opens/closes the real relay for this one channel right now, bypassing any scenario"
+        className={`text-xs ${testingDeviceId === selectedDeviceId ? "font-medium text-warning" : "text-accent hover:text-accent-hover"}`}
+      >
+        {testingDeviceId === selectedDeviceId ? "Close" : "Open"}
+      </button>
+    </div>
+  );
+}
+
+/** Live frequency/running state for one motor device, from the daemon's
+ * device_event stream -- previously nothing on this tab showed whether a
+ * given inverter was actually running or what frequency it was doing,
+ * only the whole gateway's connected/disconnected dot next to the
+ * instance header. Renders nothing until the first event for this exact
+ * (instance_id, channel) arrives -- right after connect, or the next time
+ * a scenario/test actually changes it. */
+function MotorLiveState({ zoneId, instanceId, channel }: { zoneId: number; instanceId: string; channel: string }): JSX.Element | null {
+  const live = useZonesStore((s) => s.devices.get(deviceStateKey(zoneId, instanceId, channel)));
+  if (!live) return null;
+
+  const frequency = typeof live.state.frequency === "number" ? live.state.frequency : null;
+  const running =
+    typeof live.state.is_running === "boolean" ? live.state.is_running
+    : typeof live.state.active === "boolean" ? live.state.active
+    : null;
+
+  return (
+    <span className={running ? "text-success" : "text-text-muted"}>
+      {" · "}
+      {running === true ? "running" : running === false ? "stopped" : "—"}
+      {frequency !== null && ` ${frequency.toFixed(1)}Hz`}
+    </span>
   );
 }
 
