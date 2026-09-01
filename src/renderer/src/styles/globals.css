@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-bg-base text-text-secondary font-ui text-base antialiased;
+    /* Desktop app, not a document -- no page scrollbar of its own. */
+    overflow: hidden;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    @apply bg-bg-surface1;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply bg-bg-surface3 rounded-control;
+  }
+}
