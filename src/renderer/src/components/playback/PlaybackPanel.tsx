@@ -69,26 +69,40 @@ export function PlaybackPanel(): JSX.Element {
     if (timelineZoneId === null && zones.length > 0) setTimelineZoneId(zones[0].zone_id);
   }, [zones, timelineZoneId]);
 
-  useEffect(() => {
-    if (!timelineScenarioId && scenarios.length > 0) setTimelineScenarioId(scenarios[0].scenario_id);
-  }, [scenarios, timelineScenarioId]);
+  // Zone status carries the daemon's own `scenario_id` (what's ACTUALLY
+  // loaded/playing right now), not just this tab's local picks -- read here
+  // so the defaulting effects below can prefer it over "first in the list"
+  // when the HMI (re)connects mid-show and has no pick of its own yet.
+  const liveZones = useZonesStore((s) => s.zones);
 
-  // Default every zone to the first available scenario, same as each card
-  // used to do for itself -- only fills in zones that don't have a pick yet.
+  useEffect(() => {
+    if (timelineScenarioId) return;
+    const live = timelineZoneId !== null ? liveZones.get(timelineZoneId)?.scenario_id : null;
+    const fallback = scenarios.length > 0 ? scenarios[0].scenario_id : "";
+    const preferred = live && scenarios.some((s) => s.scenario_id === live) ? live : fallback;
+    if (preferred) setTimelineScenarioId(preferred);
+  }, [scenarios, timelineScenarioId, timelineZoneId, liveZones]);
+
+  // Default every zone to whatever the daemon says is actually loaded there
+  // right now, falling back to the first available scenario only if nothing
+  // is currently running -- same as before, just no longer blind to a show
+  // already in progress when this tab first mounts (e.g. HMI closed and
+  // reopened while a zone kept playing). Only ever fills in a zone that
+  // doesn't have a pick yet; never overwrites an operator's own selection.
   useEffect(() => {
     if (scenarios.length === 0 || zones.length === 0) return;
     setSelectedScenarios((prev) => {
       let changed = false;
       const next = { ...prev };
       for (const zone of zones) {
-        if (!next[zone.zone_id]) {
-          next[zone.zone_id] = scenarios[0].scenario_id;
-          changed = true;
-        }
+        if (next[zone.zone_id]) continue;
+        const live = liveZones.get(zone.zone_id)?.scenario_id;
+        next[zone.zone_id] = live && scenarios.some((s) => s.scenario_id === live) ? live : scenarios[0].scenario_id;
+        changed = true;
       }
       return changed ? next : prev;
     });
-  }, [zones, scenarios]);
+  }, [zones, scenarios, liveZones]);
 
   const timelineZoneStatus = useZonesStore((s) => (timelineZoneId !== null ? s.zones.get(timelineZoneId) : undefined));
   const timelineState = timelineZoneStatus?.state ?? "stopped";

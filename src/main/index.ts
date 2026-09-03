@@ -29,6 +29,25 @@ function logLine(line: string): void {
 
 let mainWindow: BrowserWindow | null = null;
 
+// A site panel can get double-launched (a stray desktop-icon double-click,
+// the auto-launch entry racing a manual start after a reboot) -- without
+// this, the second instance would spawn its OWN daemon child process too
+// (isDaemonAlreadyRunning's health-check race means it isn't guaranteed to
+// see the first instance's daemon in time), fighting over port 8765 and
+// the same Modbus/Art-Net links. requestSingleInstanceLock() makes the
+// second launch hand off to the first and exit immediately instead.
+const gotSingleInstanceLock = app.requestSingleInstanceLock();
+if (!gotSingleInstanceLock) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -154,20 +173,46 @@ ipcMain.handle("export-logs", async () => {
   }
 });
 
-function resolveDaemonPaths(): { cwd: string; python: string } {
+interface DaemonLaunch {
+  command: string;
+  args: string[];
+  cwd: string;
+}
+
+function resolveDaemonPaths(): DaemonLaunch {
+  // A packaged build ships fountain-daemon.spec's frozen fountain-daemon.exe
+  // as an electron-builder extraResource (see electron-builder.yml) --
+  // no Python interpreter or `.venv` needs to exist on the target machine
+  // at all, which is the whole point of the .exe over spawning
+  // `python -m app.main` the way dev mode still does below.
+  if (app.isPackaged) {
+    const exePath = join(process.resourcesPath, "fountain-daemon", "fountain-daemon.exe");
+    // NOT the exe's own resource directory: on a standard install (NSIS
+    // defaults to Program Files) that tree is owned by the installer, not
+    // the logged-in operator, and every ADD_DEVICE/scenario Save the daemon
+    // does is a write to `data/` under its cwd (see persistence.py's
+    // DATA_DIR) -- writing there fails with a permissions error the
+    // operator has no way to diagnose from a control panel with no
+    // terminal. userData (%APPDATA%/fountain-hmi on Windows) is always
+    // writable by whichever account is running the app, survives an
+    // upgrade/reinstall the same way an installed app's settings would,
+    // and is the same per-user directory Electron itself already uses for
+    // its own state.
+    return { command: exePath, args: [], cwd: app.getPath("userData") };
+  }
+
   // __dirname, not app.getAppPath() -- the latter returns the directory of
   // the nearest package.json walking up from the entry point, which is
   // fountain-hmi's own root when launched via `electron-vite dev` (its dev
   // server runs from there) but falls back to the entry SCRIPT's own
   // directory (out/main) when there's no package.json to find there, e.g.
-  // launching the built output directly (`electron out/main/index.js`, or
-  // eventually a packaged build) -- silently pointing this at
-  // out/fountain-daemon, which doesn't exist. __dirname is main/index.js's
-  // own compiled location in both cases: out/main, three levels below the
-  // fountain-hmi/fountain-daemon sibling pair.
+  // launching the built output directly (`electron out/main/index.js`) --
+  // silently pointing this at out/fountain-daemon, which doesn't exist.
+  // __dirname is main/index.js's own compiled location in both cases:
+  // out/main, three levels below the fountain-hmi/fountain-daemon sibling pair.
   const daemonDir = resolve(__dirname, "..", "..", "..", "fountain-daemon");
   const python = join(daemonDir, ".venv", "Scripts", "python.exe");
-  return { cwd: daemonDir, python };
+  return { command: python, args: ["-m", "app.main"], cwd: daemonDir };
 }
 
 // Same folder persistence.py's resolve_music_path treats a relative
@@ -223,10 +268,10 @@ async function startDaemon(): Promise<void> {
     return;
   }
 
-  const { cwd, python } = resolveDaemonPaths();
-  logLine(`[daemon] starting: ${python} -m app.main (cwd=${cwd})`);
+  const { command, args, cwd } = resolveDaemonPaths();
+  logLine(`[daemon] starting: ${command} ${args.join(" ")} (cwd=${cwd})`);
 
-  const proc = spawn(python, ["-m", "app.main"], { cwd, stdio: "pipe" });
+  const proc = spawn(command, args, { cwd, stdio: "pipe" });
   daemonProcess = proc;
 
   proc.stdout?.on("data", (chunk: Buffer) => logLine(`[daemon] ${chunk.toString().trimEnd()}`));
@@ -255,7 +300,7 @@ async function startDaemon(): Promise<void> {
     if (daemonRestartAttempts > MAX_DAEMON_RESTART_ATTEMPTS) {
       logLine(
         `[daemon] gave up after ${MAX_DAEMON_RESTART_ATTEMPTS} restart attempts -- ` +
-          `run it manually (${python} -m app.main in ${cwd}) to see the actual error`,
+          `run it manually (${command} ${args.join(" ")} in ${cwd}) to see the actual error`,
       );
       setDaemonStatus({ phase: "failed", maxAttempts: MAX_DAEMON_RESTART_ATTEMPTS });
       return;
@@ -282,15 +327,21 @@ function configureAutoLaunch(): void {
   app.setLoginItemSettings({ openAtLogin: true, path: process.execPath });
 }
 
-void app.whenReady().then(() => {
-  createWindow();
-  configureAutoLaunch();
-  void startDaemon();
+// gotSingleInstanceLock is false only when app.quit() was already called
+// above (a second launch handing off to the first) -- whenReady would still
+// resolve before that quit takes effect, so guard here too rather than
+// spawn a second daemon and a window that's about to disappear anyway.
+if (gotSingleInstanceLock) {
+  void app.whenReady().then(() => {
+    createWindow();
+    configureAutoLaunch();
+    void startDaemon();
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    app.on("activate", () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    });
   });
-});
+}
 
 app.on("before-quit", () => {
   shuttingDown = true;

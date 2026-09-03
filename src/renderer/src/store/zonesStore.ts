@@ -46,11 +46,16 @@ export const useZonesStore = create<ZonesStore>((set) => ({
     set((prev) => {
       switch (event.type) {
         case "zone_status": {
-          // Re-render only on an actual state transition (stopped -> playing,
-          // etc.) -- position ticks ~20Hz per playing zone and is handled
-          // entirely outside React state, see lib/livePosition.ts.
+          // Re-render on an actual state transition (stopped -> playing,
+          // etc.) OR a scenario switch that doesn't change state (Play
+          // pressed with a different scenario picked while already
+          // playing -- stays "playing" throughout, only scenario_id
+          // changes) -- but not on position ticks, which is why this
+          // isn't just `existing !== event`. Position ticks ~20Hz per
+          // playing zone and are handled entirely outside React state,
+          // see lib/livePosition.ts.
           const existing = prev.zones.get(event.zone_id);
-          if (existing && existing.state === event.state) return {};
+          if (existing && existing.state === event.state && existing.scenario_id === event.scenario_id) return {};
           const zones = new Map(prev.zones);
           zones.set(event.zone_id, event);
           return { zones };

@@ -1,0 +1,38 @@
+# electron-builder config -- produces a real Windows installer instead of
+# the "clone the repo, build a venv by hand, run electron-vite dev" flow
+# this app has needed until now (see main/index.ts's resolveDaemonPaths).
+# Run `pnpm run package` (fountain-daemon/build.ps1 first -- see that
+# script's own header) to build fountain-hmi/dist/Fountain Control Setup *.exe.
+
+appId: com.fountain.control-hmi
+productName: Fountain Control
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - out/**/*
+  - package.json
+
+# The daemon's frozen exe (built by fountain-daemon/build.ps1) rides along
+# as a resource next to the app, not inside the asar archive -- it's a
+# native binary Electron spawns as a child process, not something bundled
+# JS ever needs to `require()`. main/index.ts's resolveDaemonPaths() reads
+# it back from process.resourcesPath under this exact "fountain-daemon"
+# subfolder in a packaged build.
+extraResources:
+  - from: ../fountain-daemon/dist/fountain-daemon.exe
+    to: fountain-daemon/fountain-daemon.exe
+
+win:
+  target: nsis
+  # No code-signing certificate exists for this project yet -- an unsigned
+  # installer still runs fine (through a SmartScreen "unknown publisher"
+  # prompt an operator clicks past once), it just isn't silent about it.
+  # Sign this once a cert is available; nothing else here needs to change.
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
