@@ -3,6 +3,12 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# PyInstaller build output (build.ps1 / fountain-daemon.spec) -- generated
+# from source on demand, not something to track; the built .exe is what
+# fountain-hmi's electron-builder packaging step picks up as a resource.
+build/
+dist/
+
 # Runtime/operator data -- machine-specific hardware config (real IPs) and
 # authored show files, not source code. Track individual scenario files by
 # hand (git add -f) if you want specific shows under version control.

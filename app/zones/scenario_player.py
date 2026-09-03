@@ -277,7 +277,14 @@ class ZoneScenarioPlayer:
         self.bus.publish(ZoneStatusEvent(
             zone_id=self.zone_id,
             state=state,  # type: ignore[arg-type]
-            scenario_id=None,
+            # Was hardcoded None -- a HMI that (re)connects while this zone
+            # is mid-show had no way to learn which scenario is actually
+            # running, only that *something* is (state="playing"). Reports
+            # loaded_scenario_id, not the play() call's fleeting argument --
+            # this is the same field load_project() uses to decide whether a
+            # replay is "the same scenario" (see its docstring), so it's
+            # already exactly "whatever is currently loaded", stopped or not.
+            scenario_id=self.loaded_scenario_id,
             position=round(self.current_position, 2),
             duration=self.project.duration if self.project else 0.0,
         ))
