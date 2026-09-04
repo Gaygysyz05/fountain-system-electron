@@ -248,6 +248,10 @@ class ZoneStatusEvent(BaseModel):
     scenario_id: Optional[str] = None
     position: float = 0.0
     duration: float = 0.0
+    # Was tracked server-side (SET_LOOP -> player.is_looping, honored by the
+    # tick loop) but never reported back -- a reconnecting HMI, or a second
+    # window, had no way to learn the current value and always assumed off.
+    is_looping: bool = False
 
 
 class DeviceStateEvent(BaseModel):

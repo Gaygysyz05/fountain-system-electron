@@ -287,4 +287,5 @@ class ZoneScenarioPlayer:
             scenario_id=self.loaded_scenario_id,
             position=round(self.current_position, 2),
             duration=self.project.duration if self.project else 0.0,
+            is_looping=self.is_looping,
         ))

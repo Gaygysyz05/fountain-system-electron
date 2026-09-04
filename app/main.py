@@ -16,7 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 from uuid import uuid4
 
@@ -99,12 +99,38 @@ async def _schedule_loop() -> None:
             logger.exception("schedule check failed")
 
 
+async def _emergency_stop_all_zones() -> None:
+    """A daemon shutdown -- whether the operator closes the HMI mid-show, the
+    process is killed to be restarted, or anything else -- used to do
+    NOTHING to the hardware: no zone's emergency_stop() was ever called, so
+    a valve/motor/light left running when this exits stayed exactly as it
+    was, unattended, since the watchdog and everything else keeping it in
+    check dies right along with this process. Better to force everything
+    off on the way out than to abandon it running. Called from lifespan's
+    own shutdown (below) AND from POST /shutdown (see its own docstring for
+    why the HTTP path exists separately)."""
+    if not zones:
+        return
+    logger.info("emergency-stopping %d zone(s)", len(zones))
+    await asyncio.gather(*(z.emergency_stop() for z in zones.values()), return_exceptions=True)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await persistence.load_installation(get_zone)
     schedule_task = asyncio.create_task(_schedule_loop())
     yield
     schedule_task.cancel()
+    # Await the cancellation rather than firing and moving straight on --
+    # otherwise the loop can still be mid-`_check_schedule()` (specifically
+    # mid `await zone.player.play()`) when cancel() returns, and only
+    # actually stop a few event-loop turns later. Racing that against
+    # _emergency_stop_all_zones() below risked the scheduler re-arming a
+    # zone's player right as shutdown was telling its driver instances to
+    # stop -- an emergency stop that gets silently undone a moment later.
+    with suppress(asyncio.CancelledError):
+        await schedule_task
+    await _emergency_stop_all_zones()
 
 
 app = FastAPI(title="Fountain Control Daemon", lifespan=lifespan)
@@ -138,6 +164,20 @@ app.add_middleware(
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "zones_active": list(zones.keys())}
+
+
+@app.post("/shutdown")
+async def shutdown() -> dict:
+    """Called by the Electron shell right before it kills this process.
+    HTTP, not an OS signal: Node's ChildProcess.kill() on Windows doesn't
+    reliably give asyncio's own signal handlers -- which lifespan's
+    shutdown depends on -- any chance to run, so the emergency-stop that
+    normally happens on ASGI shutdown could otherwise be skipped entirely
+    on the one platform this actually ships to. The process still gets
+    killed by the caller right after this returns; this only guarantees
+    that happens with the hardware already off rather than mid-command."""
+    await _emergency_stop_all_zones()
+    return {"status": "ok"}
 
 
 @app.get("/zones")
