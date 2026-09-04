@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { Sidebar } from "./Sidebar";
 import { StatusBar } from "./StatusBar";
 import { EmergencyStopButton } from "./EmergencyStopButton";
@@ -10,6 +10,7 @@ import { TimelinePanel } from "../timeline/TimelinePanel";
 import { SchedulePanel } from "../schedule/SchedulePanel";
 import { AuditLogPanel } from "../log/AuditLogPanel";
 import { SettingsPanel } from "../settings/SettingsPanel";
+import { ContextMenu } from "../timeline/ContextMenu";
 
 type View = "timeline" | "playback" | "preview" | "devices" | "schedule" | "log" | "settings";
 
@@ -23,6 +24,24 @@ const SIDEBAR_COLLAPSED_KEY = "sidebarCollapsed";
 
 export function AppShell(): JSX.Element {
   const [view, setView] = useState<View>("timeline");
+  // The app menu (currently just "Settings") -- tucked behind the
+  // "Fountain Control" button rather than sitting in the tab row as its
+  // own tab, the same way a desktop app's own preferences live behind a
+  // File/app menu rather than as a permanent tab next to its documents.
+  // null when closed; the button's own position when open, so the menu
+  // opens right under it regardless of window width.
+  const [menuAnchor, setMenuAnchor] = useState<{ x: number; y: number } | null>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+
+  function toggleMenu(): void {
+    if (menuAnchor) {
+      setMenuAnchor(null);
+      return;
+    }
+    const rect = menuButtonRef.current?.getBoundingClientRect();
+    if (rect) setMenuAnchor({ x: rect.left, y: rect.bottom + 4 });
+  }
+
   // Remembered across restarts -- once someone hides the zones list to get
   // the width back for a wide Timeline grid, re-showing it on every launch
   // would defeat the point.
@@ -49,17 +68,33 @@ export function AppShell(): JSX.Element {
   return (
     <div className="flex h-screen flex-col">
       <header className="flex h-row shrink-0 items-center gap-md border-b border-border bg-bg-surface1 px-md text-sm text-text-secondary">
-        <span className="mr-md">Fountain Control</span>
+        <button
+          ref={menuButtonRef}
+          onClick={toggleMenu}
+          className={`mr-md rounded-control px-xs py-1 font-medium ${
+            view === "settings" || menuAnchor ? "bg-bg-surface3 text-text-primary" : "text-text-secondary hover:bg-bg-surface2 hover:text-text-primary"
+          }`}
+        >
+          Fountain Control
+        </button>
         <ViewTab label="Timeline" active={view === "timeline"} onClick={() => setView("timeline")} />
         <ViewTab label="Playback" active={view === "playback"} onClick={() => setView("playback")} />
         <ViewTab label="Devices" active={view === "devices"} onClick={() => setView("devices")} />
         <ViewTab label="Preview" active={view === "preview"} onClick={() => setView("preview")} />
         <ViewTab label="Schedule" active={view === "schedule"} onClick={() => setView("schedule")} />
         <ViewTab label="Log" active={view === "log"} onClick={() => setView("log")} />
-        <ViewTab label="Settings" active={view === "settings"} onClick={() => setView("settings")} />
         <div className="flex-1" />
         <EmergencyStopButton />
       </header>
+
+      {menuAnchor && (
+        <ContextMenu
+          x={menuAnchor.x}
+          y={menuAnchor.y}
+          onClose={() => setMenuAnchor(null)}
+          sections={[[{ label: "Settings", onClick: () => setView("settings") }]]}
+        />
+      )}
 
       <div className="flex min-h-0 flex-1">
         <Sidebar collapsed={sidebarCollapsed} onToggleCollapsed={toggleSidebar} />
