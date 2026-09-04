@@ -565,7 +565,7 @@ function InstanceCard(props: {
               <>
                 <span className="text-xs text-text-muted">
                   Click a channel to include it in scenarios (e.g. exclude a dead relay) or bring it back. This
-                  never touches the real relay -- use "Test a channel" below for that.
+                  never touches the real relay -- use the orange test grid below for that.
                 </span>
                 <ChannelGrid
                   items={Array.from({ length: totalChannels }, (_, i) => {
@@ -806,70 +806,75 @@ function InstanceCard(props: {
  * Firing a real relay used to share its click target with "include this
  * channel in scenarios" -- a whole-instance "Test mode" toggle changed
  * what clicking a channel chip DID, and forgetting it was still on meant
- * a click meant to configure channels instead fired the real relay. This
- * is a fully separate, explicit action instead: pick a channel, press
- * Test -- same one-button-per-action shape as a motor's "Test 10Hz" or a
- * light's "Test color", and the channel grid above always means the same
- * thing regardless of what's going on down here.
+ * a click meant to configure channels instead fired the real relay.
+ *
+ * This is a fully separate grid instead: same numbered-chip layout as the
+ * config grid above (so it still reads as "channels on this board"), but
+ * rendered in ChannelGrid's `warning` variant (orange, not blue) so it's
+ * never mistakable for the config grid at a glance, and every click here
+ * ALWAYS means "energize/de-energize this channel right now" -- no mode
+ * toggle to forget you left on. Several channels can be open at once, the
+ * way an operator would actually bench-test a wired-up relay board rather
+ * than being forced through one channel at a time; "Close all" is the
+ * panic button for "I'm done, put it all back to off".
  */
 function ValveTestControl(props: {
   devices: import("../../lib/protocol").DeviceDto[];
   onTestDevice: (deviceId: string, parameters: Record<string, unknown>) => void;
 }): JSX.Element {
-  const sorted = useMemo(() => [...props.devices].sort((a, b) => Number(a.channel) - Number(b.channel)), [props.devices]);
-  const [selectedDeviceId, setSelectedDeviceId] = useState(sorted[0]?.device_id ?? "");
-  const [testingDeviceId, setTestingDeviceId] = useState<string | null>(null);
-  const testingDeviceIdRef = useRef<string | null>(null);
-  testingDeviceIdRef.current = testingDeviceId;
+  const [testing, setTesting] = useState<Set<string>>(new Set());
+  const testingRef = useRef<Set<string>>(testing);
+  testingRef.current = testing;
 
-  // A test left running must not survive navigating away from this card
-  // (switching zones, removing the instance) -- same reasoning as the old
-  // exitValveTestMode, just scoped to the one channel this control can
-  // ever have open instead of a whole Set of them.
+  // Nothing left energized just because the operator navigated away
+  // (switching zones, removing the instance, collapsing this card) --
+  // same reasoning as the old single-channel version, now over every
+  // channel this grid could have open at once.
   useEffect(() => {
     return () => {
-      if (testingDeviceIdRef.current) props.onTestDevice(testingDeviceIdRef.current, { on: false });
+      for (const deviceId of testingRef.current) props.onTestDevice(deviceId, { on: false });
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- unmount-only, reads the ref for the latest value
   }, []);
 
-  function toggle(): void {
-    if (!selectedDeviceId) return;
-    if (testingDeviceId === selectedDeviceId) {
-      props.onTestDevice(selectedDeviceId, { on: false });
-      setTestingDeviceId(null);
+  function toggle(channel: string): void {
+    const device = props.devices.find((d) => d.channel === channel);
+    if (!device) return;
+    const next = new Set(testing);
+    if (next.has(device.device_id)) {
+      next.delete(device.device_id);
+      props.onTestDevice(device.device_id, { on: false });
     } else {
-      if (testingDeviceId) props.onTestDevice(testingDeviceId, { on: false }); // switching channels -- close the previous one first
-      props.onTestDevice(selectedDeviceId, { on: true });
-      setTestingDeviceId(selectedDeviceId);
+      next.add(device.device_id);
+      props.onTestDevice(device.device_id, { on: true });
     }
+    setTesting(next);
+  }
+
+  function closeAll(): void {
+    for (const deviceId of testing) props.onTestDevice(deviceId, { on: false });
+    setTesting(new Set());
   }
 
   return (
-    <div className="flex items-center gap-xs border-t border-border pt-xs">
-      <span className="text-xs text-text-muted">Test a channel:</span>
-      <select
-        value={selectedDeviceId}
-        onChange={(e) => {
-          if (testingDeviceId) props.onTestDevice(testingDeviceId, { on: false }); // switching selection closes whatever was open
-          setTestingDeviceId(null);
-          setSelectedDeviceId(e.target.value);
-        }}
-        className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-xs text-text-primary focus:border-accent focus:outline-none"
-      >
-        {sorted.map((d) => (
-          <option key={d.device_id} value={d.device_id}>
-            Channel {d.channel} — {d.device_id}
-          </option>
-        ))}
-      </select>
-      <button
-        onClick={toggle}
-        title="Opens/closes the real relay for this one channel right now, bypassing any scenario"
-        className={`text-xs ${testingDeviceId === selectedDeviceId ? "font-medium text-warning" : "text-accent hover:text-accent-hover"}`}
-      >
-        {testingDeviceId === selectedDeviceId ? "Close" : "Open"}
-      </button>
+    <div className="flex flex-col gap-xs border-t border-border pt-xs">
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-text-muted">⚠ Test channels — click fires the real relay:</span>
+        {testing.size > 0 && (
+          <button onClick={closeAll} className="text-xs font-medium text-warning hover:text-warning-hover">
+            Close all ({testing.size})
+          </button>
+        )}
+      </div>
+      <ChannelGrid
+        variant="warning"
+        items={props.devices.map((d) => ({
+          channel: d.channel,
+          active: testing.has(d.device_id),
+          title: `${d.device_id} — click to ${testing.has(d.device_id) ? "close" : "open"} for real`,
+        }))}
+        onToggle={toggle}
+      />
     </div>
   );
 }

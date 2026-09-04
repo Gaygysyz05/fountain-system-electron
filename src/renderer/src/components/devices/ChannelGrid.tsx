@@ -18,7 +18,31 @@ export interface ChannelGridItem {
  * has its own identity worth a full row (see the callers for the total_channels
  * check that decides which presentation applies).
  */
-export function ChannelGrid({ items, onToggle }: { items: ChannelGridItem[]; onToggle: (channel: string) => void }): JSX.Element {
+const ACTIVE_CLASSES = {
+  // Config grid (include/exclude a channel from scenarios) -- the app's
+  // usual accent color, matching every other "this is selected/on" chip
+  // elsewhere in the UI.
+  accent: "bg-accent text-white hover:bg-accent-hover",
+  // Live-hardware test grid (see DeviceConfigPanel.tsx's ValveTestControl)
+  // -- deliberately a DIFFERENT color from the config grid's, not just a
+  // different label: the two grids sit right next to each other and both
+  // read as "a grid of channel chips", so if "active" ever looked the same
+  // in both, a glance couldn't tell "included in the scenario" apart from
+  // "the real relay is energized right now". Warning-orange reads as "this
+  // is live" the same way it does on Motor's "Test 10Hz" / Light's own test
+  // controls elsewhere on this tab.
+  warning: "bg-warning text-white hover:bg-warning-hover",
+} as const;
+
+export function ChannelGrid({
+  items,
+  onToggle,
+  variant = "accent",
+}: {
+  items: ChannelGridItem[];
+  onToggle: (channel: string) => void;
+  variant?: keyof typeof ACTIVE_CLASSES;
+}): JSX.Element {
   // Numeric order regardless of input order -- callers pass devices in
   // whatever order the daemon's device map iterates them, which is
   // insertion order, not channel order (re-adding a previously-removed
@@ -35,9 +59,7 @@ export function ChannelGrid({ items, onToggle }: { items: ChannelGridItem[]; onT
           onClick={() => onToggle(item.channel)}
           title={item.title}
           className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-control text-xs font-medium ${
-            item.active
-              ? "bg-accent text-white hover:bg-accent-hover"
-              : "bg-bg-surface3 text-text-disabled hover:bg-bg-surface2"
+            item.active ? ACTIVE_CLASSES[variant] : "bg-bg-surface3 text-text-disabled hover:bg-bg-surface2"
           }`}
         >
           {item.channel}
