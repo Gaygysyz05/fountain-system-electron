@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useConnectionStore } from "../../store/connectionStore";
 import { useConfigStore } from "../../store/configStore";
 import { useDaemonStatusStore } from "../../store/daemonStatusStore";
+import { useZonesStore } from "../../store/zonesStore";
 
 /**
  * The "live metrics strip" pattern from the original PyQt6 apps' status bars
@@ -41,13 +42,19 @@ export function StatusBar(): JSX.Element {
   const lastError = useConnectionStore((s) => s.lastError);
   const configuredZones = useConfigStore((s) => s.zones);
   const daemonStatus = useDaemonStatusStore((s) => s.status);
+  // WS "open" (the TCP socket) is not the same claim as "the daemon's event
+  // loop is actually alive and pushing updates" -- a deadlocked daemon can
+  // leave the socket sitting open with nothing coming through it. See
+  // zonesStore.ts's staleness watcher for what actually sets this.
+  const stale = useZonesStore((s) => s.stale);
   const zoneCount = configuredZones.length;
   const deviceCount = configuredZones.reduce((sum, z) => sum + z.devices.length, 0);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
 
   const statusDotColor =
-    status === "open" ? "bg-success" : status === "connecting" ? "bg-warning" : "bg-danger";
-  const statusLabel = status === "open" ? "Connected" : status === "connecting" ? "Connecting…" : "Disconnected";
+    status === "open" ? (stale ? "bg-danger" : "bg-success") : status === "connecting" ? "bg-warning" : "bg-danger";
+  const statusLabel =
+    status === "open" ? (stale ? "Stalled" : "Connected") : status === "connecting" ? "Connecting…" : "Disconnected";
   const daemonLabel = daemonStatusLabel(daemonStatus);
 
   async function handleExportLogs(): Promise<void> {
@@ -65,7 +72,10 @@ export function StatusBar(): JSX.Element {
   return (
     <footer className="flex h-row items-center justify-between border-t border-border bg-bg-surface1 px-md text-sm text-text-secondary">
       <div className="flex items-center gap-lg">
-        <span className="flex items-center gap-xs">
+        <span
+          className="flex items-center gap-xs"
+          title={stale ? "The connection is open but nothing has come through it in a while -- the daemon may be stuck. Restarting it is the fastest fix." : undefined}
+        >
           <span className={`h-2 w-2 rounded-full ${statusDotColor}`} />
           {statusLabel}
         </span>

@@ -318,6 +318,30 @@ function stopDaemon(): void {
   }
 }
 
+const DAEMON_SHUTDOWN_TIMEOUT_MS = 3000;
+
+// daemonProcess.kill() alone used to be the whole shutdown path -- but on
+// Windows, Node delivers it in a way Python's asyncio signal handlers
+// aren't guaranteed to see in time to run lifespan's shutdown cleanup
+// (see main.py's POST /shutdown docstring), so a valve/motor/light active
+// when the operator just closes the window could be abandoned running.
+// This asks the daemon over HTTP to stop hardware FIRST -- something under
+// its own control regardless of how the OS handles the process exit --
+// then kills the process either way (a daemon that's already dead or
+// unreachable just hits the catch and falls through to the same kill()).
+async function stopDaemonGracefully(): Promise<void> {
+  if (!daemonProcess) return;
+  try {
+    await fetch(DAEMON_HEALTH_URL.replace("/health", "/shutdown"), {
+      method: "POST",
+      signal: AbortSignal.timeout(DAEMON_SHUTDOWN_TIMEOUT_MS),
+    });
+  } catch (err) {
+    logLine(`[daemon] graceful shutdown request failed (${err instanceof Error ? err.message : String(err)}) -- killing directly`);
+  }
+  stopDaemon();
+}
+
 // Packaged build only -- never touch the developer's own login items while
 // iterating via `electron-vite dev`. A power flicker or a Windows Update
 // reboot on the site PC would otherwise leave the fountain control panel
@@ -343,9 +367,16 @@ if (gotSingleInstanceLock) {
   });
 }
 
-app.on("before-quit", () => {
+// Deferred quit: the first before-quit intercepts the close, waits for the
+// hardware-safe shutdown above to finish (or time out), then calls
+// app.quit() itself -- which re-fires this same event. shuttingDown is
+// already true by then, so the second pass falls through and the app
+// actually exits, instead of looping.
+app.on("before-quit", (event) => {
+  if (shuttingDown) return;
+  event.preventDefault();
   shuttingDown = true;
-  stopDaemon();
+  void stopDaemonGracefully().finally(() => app.quit());
 });
 
 app.on("window-all-closed", () => {

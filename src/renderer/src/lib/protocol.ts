@@ -187,6 +187,7 @@ export interface ZoneStatusEvent {
   scenario_id: string | null;
   position: number;
   duration: number;
+  is_looping: boolean;
 }
 
 export interface DeviceStateEvent {

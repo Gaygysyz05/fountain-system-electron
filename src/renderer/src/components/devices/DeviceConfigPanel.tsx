@@ -4,9 +4,11 @@ import { useConnectionStore } from "../../store/connectionStore";
 import { deviceStateKey, useZonesStore } from "../../store/zonesStore";
 import { ChannelGrid } from "./ChannelGrid";
 import { SchemaForm } from "./SchemaForm";
-import type { DeviceType } from "../../lib/protocol";
+import type { DeviceType, ZoneConfigDto } from "../../lib/protocol";
 
 const CATEGORY_LABEL: Record<DeviceType, string> = { valve: "Valve", motor: "Motor", light: "Light" };
+
+type StatusFilter = "all" | "connected" | "disconnected";
 
 /**
  * The screen this whole driver-registry rework exists to unlock: configure
@@ -24,6 +26,7 @@ export function DeviceConfigPanel(): JSX.Element {
     loadDrivers,
     loadZones,
     selectedZoneId,
+    selectZone,
     connectZone,
     addDriverInstance,
     removeDriverInstance,
@@ -42,9 +45,23 @@ export function DeviceConfigPanel(): JSX.Element {
 
   /** Forces an instance's reconnect right now instead of waiting on its
    * background watchdog's next pass -- for right after power-cycling real
-   * hardware or fixing a cable. */
-  function reconnectInstance(zoneId: number, instanceId: string): void {
-    void sendCommand({ command: "RECONNECT_INSTANCE", zone_id: zoneId, instance_id: instanceId });
+   * hardware or fixing a cable. Awaits the daemon's Ack (sendCommand only
+   * resolves once that arrives, and _dispatch on the daemon side already
+   * awaited the connect attempt itself before sending it) then refetches
+   * so the caller can read back the real outcome -- this used to be pure
+   * fire-and-forget, leaving the button with nothing to show for having
+   * been clicked. */
+  async function reconnectInstance(zoneId: number, instanceId: string): Promise<boolean> {
+    await sendCommand({ command: "RECONNECT_INSTANCE", zone_id: zoneId, instance_id: instanceId });
+    await loadZones();
+    // useConfigStore.getState(), not the `zones` destructured above -- that
+    // reference is from whichever render created this closure, predating
+    // the loadZones() call just above it.
+    const instance = useConfigStore
+      .getState()
+      .zones.find((z) => z.zone_id === zoneId)
+      ?.driver_instances.find((i) => i.instance_id === instanceId);
+    return instance?.connected ?? false;
   }
 
   /** Applies device state immediately, bypassing the scenario player --
@@ -61,12 +78,50 @@ export function DeviceConfigPanel(): JSX.Element {
 
   const selectedZone = zones.find((z) => z.zone_id === selectedZoneId) ?? null;
 
+  const [searchQuery, setSearchQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  // Whether to show cross-zone search results instead of the single
+  // selected zone's editor -- an install with dozens of devices across
+  // several zones had no way to just find "that one motor" short of
+  // clicking through each zone by hand.
+  const searching = searchQuery.trim() !== "" || statusFilter !== "all";
+
   return (
-    <div className="flex min-h-0 flex-1 overflow-y-auto p-lg">
+    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-lg">
       {error && <p className="mb-md text-sm text-danger">{error}</p>}
       {loading && zones.length === 0 && <p className="text-sm text-text-muted">Loading…</p>}
 
-      {selectedZoneId === null ? (
+      <div className="mb-md flex items-center gap-sm">
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search devices by name, across all zones…"
+          className="h-input w-72 rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+        />
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+          className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+        >
+          <option value="all">Any status</option>
+          <option value="connected">Connected only</option>
+          <option value="disconnected">Disconnected only</option>
+        </select>
+      </div>
+
+      {searching ? (
+        <DeviceSearchResults
+          zones={zones}
+          query={searchQuery}
+          statusFilter={statusFilter}
+          onJumpToZone={(zoneId) => {
+            selectZone(zoneId);
+            setSearchQuery("");
+            setStatusFilter("all");
+          }}
+        />
+      ) : selectedZoneId === null ? (
         <p className="text-sm text-text-muted">Select or create a zone in the sidebar to configure its devices.</p>
       ) : (
         <ZoneEditor
@@ -80,8 +135,81 @@ export function DeviceConfigPanel(): JSX.Element {
           onResetFault={resetMotorFault}
           onReconnectInstance={reconnectInstance}
           onTestDevice={testDevice}
-          onConnectAll={() => void connectZone(selectedZoneId)}
+          onConnectAll={() => connectZone(selectedZoneId)}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Cross-zone results, shown instead of ZoneEditor while a search/filter is
+ * active. Deliberately read-only + "jump to zone" rather than replaying
+ * every InstanceCard action (Test/Reconnect/Remove/...) in a second,
+ * flattened context -- those already work fine once you're actually in the
+ * right zone, which is the one thing this view exists to get you to
+ * quickly across a multi-zone install.
+ */
+function DeviceSearchResults(props: {
+  zones: ZoneConfigDto[];
+  query: string;
+  statusFilter: StatusFilter;
+  onJumpToZone: (zoneId: number) => void;
+}): JSX.Element {
+  const q = props.query.trim().toLowerCase();
+
+  const results = useMemo(() => {
+    const rows: Array<{
+      zoneId: number;
+      zoneLabel: string;
+      device: import("../../lib/protocol").DeviceDto;
+      instance: import("../../lib/protocol").DriverInstanceDto;
+    }> = [];
+    for (const zone of props.zones) {
+      const zoneLabel = zone.name?.trim() || `Zone ${zone.zone_id}`;
+      const instanceById = new Map(zone.driver_instances.map((i) => [i.instance_id, i]));
+      for (const device of zone.devices) {
+        const instance = instanceById.get(device.instance_id);
+        if (!instance) continue;
+        if (q && !device.device_id.toLowerCase().includes(q)) continue;
+        if (props.statusFilter === "connected" && !instance.connected) continue;
+        if (props.statusFilter === "disconnected" && instance.connected) continue;
+        rows.push({ zoneId: zone.zone_id, zoneLabel, device, instance });
+      }
+    }
+    return rows;
+  }, [props.zones, q, props.statusFilter]);
+
+  return (
+    <div className="flex flex-col gap-xs">
+      <p className="text-xs text-text-muted">
+        {results.length} device{results.length === 1 ? "" : "s"} found across {props.zones.length} zone{props.zones.length === 1 ? "" : "s"}
+      </p>
+      {results.length === 0 ? (
+        <p className="text-sm text-text-muted">No devices match.</p>
+      ) : (
+        <ul className="flex flex-col gap-xs">
+          {results.map(({ zoneId, zoneLabel, device, instance }) => (
+            <li
+              key={`${zoneId}:${device.device_id}`}
+              className="flex flex-wrap items-center justify-between gap-x-md gap-y-1 rounded-panel border border-border bg-bg-surface1 px-md py-sm text-sm"
+            >
+              <div className="flex flex-wrap items-center gap-sm">
+                <span className={`h-2 w-2 shrink-0 rounded-full ${instance.connected ? "bg-success" : "bg-danger"}`} />
+                <span className="font-medium text-text-primary">{device.device_id}</span>
+                <span className="text-xs text-text-muted">
+                  {CATEGORY_LABEL[device.category]} · {zoneLabel} · {instance.instance_id}
+                </span>
+              </div>
+              <button
+                onClick={() => props.onJumpToZone(zoneId)}
+                className="text-xs text-accent hover:text-accent-hover"
+              >
+                Go to zone →
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );
@@ -96,27 +224,40 @@ function ZoneEditor(props: {
   onAddDevice: (zoneId: number, deviceId: string, instanceId: string, channel: string, nozzleGroup?: string, nozzleInverter?: 1 | 2) => Promise<void>;
   onRemoveDevice: (zoneId: number, deviceId: string) => Promise<void>;
   onResetFault: (zoneId: number, deviceId: string) => void;
-  onReconnectInstance: (zoneId: number, instanceId: string) => void;
+  onReconnectInstance: (zoneId: number, instanceId: string) => Promise<boolean>;
   onTestDevice: (zoneId: number, deviceId: string, parameters: Record<string, unknown>) => void;
-  onConnectAll: () => void;
+  onConnectAll: () => Promise<{ connected: number; total: number }>;
 }): JSX.Element {
   const [showAddInstance, setShowAddInstance] = useState(false);
+  const [connectingAll, setConnectingAll] = useState(false);
+  const [connectAllResult, setConnectAllResult] = useState<string | null>(null);
 
   const instances = props.zone?.driver_instances ?? [];
   const devices = props.zone?.devices ?? [];
+
+  async function handleConnectAll(): Promise<void> {
+    setConnectingAll(true);
+    setConnectAllResult(null);
+    const { connected, total } = await props.onConnectAll();
+    setConnectingAll(false);
+    setConnectAllResult(connected === total ? `Connected ${connected}/${total}` : `Only ${connected}/${total} connected`);
+    setTimeout(() => setConnectAllResult(null), 5000);
+  }
 
   return (
     <div className="flex flex-col gap-lg">
       <div className="flex items-center justify-between">
         <h2 className="text-lg font-medium text-text-primary">{props.zone?.name?.trim() || `Zone ${props.zoneId}`}</h2>
         <div className="flex items-center gap-sm">
+          {connectAllResult && <span className="text-xs text-text-secondary">{connectAllResult}</span>}
           {instances.length > 1 && (
             <button
-              onClick={props.onConnectAll}
+              onClick={() => void handleConnectAll()}
+              disabled={connectingAll}
               title="(Re)connect every driver instance in this zone at once, instead of one at a time"
-              className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm text-text-primary hover:bg-bg-surface2"
+              className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm text-text-primary hover:bg-bg-surface2 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              Connect All
+              {connectingAll ? "Connecting…" : "Connect All"}
             </button>
           )}
           <button
@@ -229,9 +370,21 @@ function InstanceCard(props: {
   onAddDevice: (deviceId: string, channel: string, nozzleGroup?: string, nozzleInverter?: 1 | 2) => void;
   onRemoveDevice: (deviceId: string) => void;
   onResetFault: (deviceId: string) => void;
-  onReconnect: () => void;
+  onReconnect: () => Promise<boolean>;
   onTestDevice: (deviceId: string, parameters: Record<string, unknown>) => void;
 }): JSX.Element {
+  const [reconnecting, setReconnecting] = useState(false);
+  const [reconnectResult, setReconnectResult] = useState<string | null>(null);
+
+  async function handleReconnect(): Promise<void> {
+    setReconnecting(true);
+    setReconnectResult(null);
+    const connected = await props.onReconnect();
+    setReconnecting(false);
+    setReconnectResult(connected ? "Connected" : "Failed to connect");
+    setTimeout(() => setReconnectResult(null), 5000);
+  }
+
   const [showAddDevice, setShowAddDevice] = useState(false);
   const [showAddNozzle, setShowAddNozzle] = useState(false);
   const [expanded, setExpanded] = useState(false);
@@ -347,38 +500,48 @@ function InstanceCard(props: {
 
   return (
     <div className="rounded-panel border border-border bg-bg-surface1">
-      <div className="flex items-center justify-between border-b border-border px-md py-sm">
-        <div className="flex items-center gap-sm">
+      <div className="flex flex-wrap items-center justify-between gap-x-md gap-y-1 border-b border-border px-md py-sm">
+        <div className="flex flex-wrap items-center gap-sm">
           <span
-            className={`h-2 w-2 rounded-full ${props.instance.connected ? "bg-success" : "bg-danger"}`}
-            title={
-              // Art-Net is UDP -- there is no delivery acknowledgment in the
-              // protocol, so "connected" here can only ever mean "opened a
-              // local socket and is sending", never "the Node8 actually
-              // answered". Said explicitly so the dot isn't read as a real
-              // liveness check the way it genuinely is for Modbus TCP.
+            // Art-Net is UDP -- amber, not green/red, because "connected"
+            // here can only ever mean "opened a local socket and is
+            // sending", never "the Node8 actually answered". The label
+            // next to it says so out loud too, not just on hover -- a
+            // hover-only tooltip turned out invisible enough that this got
+            // asked about twice.
+            className={`h-2 w-2 rounded-full ${
               props.instance.driver_type === "artnet_rgb_light"
                 ? props.instance.connected
-                  ? "Sending -- Art-Net (UDP) has no delivery confirmation, this does not mean the fixture is actually there"
-                  : "Not sending (socket not open)"
+                  ? "bg-warning"
+                  : "bg-danger"
                 : props.instance.connected
-                  ? "Connected"
-                  : "Not connected"
-            }
+                  ? "bg-success"
+                  : "bg-danger"
+            }`}
           />
           <span className="text-sm font-medium text-text-primary">{props.instance.instance_id}</span>
+          {props.instance.driver_type === "artnet_rgb_light" && (
+            <span
+              className="text-xs text-warning"
+              title="Art-Net (UDP) has no delivery confirmation in the protocol -- this can only ever mean the daemon is sending packets, not that the fixture actually received them"
+            >
+              {props.instance.connected ? "sending, unconfirmed" : "not sending"}
+            </span>
+          )}
           <span className="text-xs text-text-muted">
             {props.instance.driver_type} · {CATEGORY_LABEL[props.instance.category]}
             {props.instance.config.slave_id != null && <> · Slave ID {String(props.instance.config.slave_id)}</>}
           </span>
         </div>
         <div className="flex items-center gap-md">
+          {reconnectResult && <span className="text-xs text-text-secondary">{reconnectResult}</span>}
           <button
-            onClick={props.onReconnect}
+            onClick={() => void handleReconnect()}
+            disabled={reconnecting}
             title="Force an immediate reconnect attempt instead of waiting for the background watchdog's next pass"
-            className="text-xs text-accent hover:text-accent-hover"
+            className="text-xs text-accent hover:text-accent-hover disabled:cursor-not-allowed disabled:opacity-60"
           >
-            Reconnect
+            {reconnecting ? "Connecting…" : "Reconnect"}
           </button>
           <button onClick={props.onRemoveInstance} className="text-xs text-danger hover:text-danger-hover">
             Remove
@@ -483,7 +646,7 @@ function InstanceCard(props: {
                       </button>
                     </li>
                   ) : (
-                    <li key={d.device_id} className="flex items-center justify-between text-sm">
+                    <li key={d.device_id} className="flex flex-wrap items-center justify-between gap-x-md gap-y-1 text-sm">
                       <span className="text-text-secondary">
                         {d.device_id} <span className="text-text-muted">— {channelWord} {d.channel}</span>
                         {d.nozzle_group != null && (
@@ -491,7 +654,7 @@ function InstanceCard(props: {
                         )}
                         {props.instance.category === "motor" && <MotorLiveState zoneId={props.zoneId} instanceId={props.instance.instance_id} channel={d.channel} />}
                       </span>
-                      <span className="flex items-center gap-sm">
+                      <span className="flex flex-wrap items-center gap-sm">
                         {props.instance.category === "motor" && (
                           <>
                             <button

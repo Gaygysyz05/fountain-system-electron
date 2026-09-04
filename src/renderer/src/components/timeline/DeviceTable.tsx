@@ -18,6 +18,13 @@ interface Cell {
   col: number;
 }
 
+// Overscan: extra rows rendered beyond the visible viewport on each side --
+// covers the gap between a scroll event firing and the next paint (without
+// it, a fast scroll shows a flash of empty spacer before real rows catch
+// up), and keeps a drag-select's target row already mounted a little before
+// the pointer visually reaches the edge.
+const ROW_OVERSCAN = 8;
+
 type Entry = { deviceId: string; time: number; parameters: Record<string, unknown> };
 
 function rectOf(a: Cell, b: Cell): { rMin: number; rMax: number; cMin: number; cMax: number } {
@@ -70,6 +77,69 @@ export function DeviceTable({
   const colorInputRef = useRef<HTMLInputElement>(null);
   const colorTargetRef = useRef<"cell" | "selection">("cell");
   const colorCellRef = useRef<Cell | null>(null);
+  const firstRealRowRef = useRef<HTMLTableRowElement>(null);
+
+  // Row virtualization -- a long scenario (music-generated ones especially:
+  // several minutes at a 0.5s step, sometimes finer) used to render every
+  // row as a real <tr>/<td> regardless of whether it was on screen, tens of
+  // thousands of DOM cells for a track-length scenario. Only the rows
+  // actually in view (+ overscan) get real <tr>s now; everything else is
+  // two spacer rows sized to match, so column widths/sticky headers/the
+  // scrollbar all still behave like a normal table (unlike switching to an
+  // absolutely-positioned div grid, which would need to fix every column's
+  // width by hand and re-litigate sticky behavior). Selection/editing state
+  // still addresses rows by their logical index into `rowTimes` -- which
+  // rows exist as DOM nodes is a rendering detail underneath that.
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [rowHeight, setRowHeight] = useState(28); // replaced by a real measurement below as soon as one row exists
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    function onScroll(): void {
+      setScrollTop(el!.scrollTop);
+    }
+    const ro = new ResizeObserver(() => setViewportHeight(el!.clientHeight));
+    ro.observe(el);
+    el.addEventListener("scroll", onScroll, { passive: true });
+    setViewportHeight(el.clientHeight);
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      ro.disconnect();
+    };
+  }, []);
+
+  // Deliberately no dependency array -- this must re-measure on every
+  // render (a row's real height can change independent of `rowHeight`
+  // itself, e.g. switching a cell into edit mode), not just when
+  // `rowHeight` changes. It can't loop: setRowHeight only fires when the
+  // measured value has actually moved by more than rounding noise, so
+  // once it matches, this effect becomes a no-op read.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const h = firstRealRowRef.current?.getBoundingClientRect().height;
+    if (h && Math.abs(h - rowHeight) > 0.5) setRowHeight(h);
+  });
+
+  const startIndex = Math.max(0, Math.floor(scrollTop / rowHeight) - ROW_OVERSCAN);
+  const endIndex = Math.min(rowTimes.length, startIndex + Math.ceil(viewportHeight / rowHeight) + ROW_OVERSCAN * 2);
+  const topSpacerHeight = startIndex * rowHeight;
+  const bottomSpacerHeight = (rowTimes.length - endIndex) * rowHeight;
+
+  /** Arrow-key navigation moves the logical selection instantly regardless
+   * of whether that row is currently mounted -- without this it could land
+   * on a row still in the (invisible) spacer, with nothing on screen
+   * showing where the selection went until the operator happened to
+   * scroll there themselves. */
+  function scrollRowIntoView(row: number): void {
+    const el = containerRef.current;
+    if (!el) return;
+    const top = row * rowHeight;
+    const bottom = top + rowHeight;
+    if (top < el.scrollTop) el.scrollTop = top;
+    else if (bottom > el.scrollTop + el.clientHeight) el.scrollTop = bottom - el.clientHeight;
+  }
 
   useEffect(() => {
     function onUp(): void {
@@ -381,6 +451,7 @@ export function DeviceTable({
       else if (e.key === "ArrowRight") col = Math.min(columns.length - 1, col + 1);
       setSelStart({ row, col });
       setSelEnd({ row, col });
+      scrollRowIntoView(row);
     } else if (e.key === "Enter" && selEnd && !editingCell) {
       e.preventDefault();
       handleClick(selEnd.row, selEnd.col);
@@ -445,8 +516,15 @@ export function DeviceTable({
           </tr>
         </thead>
         <tbody>
-          {rowTimes.map((time, row) => (
-            <tr key={time}>
+          {topSpacerHeight > 0 && (
+            <tr aria-hidden style={{ height: topSpacerHeight }}>
+              <td colSpan={columns.length + 1} style={{ padding: 0, border: "none" }} />
+            </tr>
+          )}
+          {rowTimes.slice(startIndex, endIndex).map((time, i) => {
+            const row = startIndex + i;
+            return (
+            <tr key={time} ref={i === 0 ? firstRealRowRef : undefined}>
               <td
                 title="Click to select the whole row"
                 onClick={() => selectRow(row)}
@@ -521,7 +599,13 @@ export function DeviceTable({
                 );
               })}
             </tr>
-          ))}
+            );
+          })}
+          {bottomSpacerHeight > 0 && (
+            <tr aria-hidden style={{ height: bottomSpacerHeight }}>
+              <td colSpan={columns.length + 1} style={{ padding: 0, border: "none" }} />
+            </tr>
+          )}
         </tbody>
       </table>
 

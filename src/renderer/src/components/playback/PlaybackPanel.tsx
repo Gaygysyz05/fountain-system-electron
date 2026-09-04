@@ -123,6 +123,20 @@ export function PlaybackPanel(): JSX.Element {
     }
   }
 
+  // Play All's obvious counterparts -- it shipped without them, which read
+  // as "you can start everything together but have to stop each zone by
+  // hand", the opposite of what a multi-zone show actually needs. PAUSE_ZONE/
+  // STOP_ZONE on a zone that isn't playing is a harmless no-op on the daemon
+  // side, so these just fire at every configured zone unconditionally
+  // rather than first checking each one's live state.
+  function pauseAllZones(): void {
+    for (const zone of zones) void sendCommand({ command: "PAUSE_ZONE", zone_id: zone.zone_id });
+  }
+
+  function stopAllZones(): void {
+    for (const zone of zones) void sendCommand({ command: "STOP_ZONE", zone_id: zone.zone_id });
+  }
+
   function toggleTimelineLoop(): void {
     if (timelineZoneId === null) return;
     const next = !timelineLoop;
@@ -158,13 +172,29 @@ export function PlaybackPanel(): JSX.Element {
         </div>
 
         {tab === "controls" && zones.length > 1 && (
-          <button
-            onClick={playAllZones}
-            title="Starts every zone's currently-selected scenario at once, instead of pressing Play on each card in turn"
-            className="mb-sm h-control rounded-control bg-primary px-md text-sm font-medium text-text-primary hover:bg-primary-hover"
-          >
-            ▶ Play All
-          </button>
+          <div className="mb-sm flex items-center gap-sm">
+            <button
+              onClick={playAllZones}
+              title="Starts every zone's currently-selected scenario at once, instead of pressing Play on each card in turn"
+              className="h-control rounded-control bg-primary px-md text-sm font-medium text-text-primary hover:bg-primary-hover"
+            >
+              ▶ Play All
+            </button>
+            <button
+              onClick={pauseAllZones}
+              title="Pauses every zone at once"
+              className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm font-medium text-text-primary hover:bg-bg-surface2"
+            >
+              ⏸ Pause All
+            </button>
+            <button
+              onClick={stopAllZones}
+              title="Stops every zone at once (not an emergency stop -- for that, use the button in the header)"
+              className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm font-medium text-text-primary hover:bg-bg-surface2"
+            >
+              ■ Stop All
+            </button>
+          </div>
         )}
 
         {tab === "timeline" && timelineZoneId !== null && (
@@ -226,11 +256,22 @@ function ZoneControlCard({
   selectedScenarioId: string;
   onSelectScenario: (scenarioId: string) => void;
 }): JSX.Element {
-  const [loopEnabled, setLoopEnabled] = useState(false);
   const sendCommand = useConnectionStore((s) => s.sendCommand);
 
   const zoneStatus = useZonesStore((s) => s.zones.get(zone.zone_id));
   const state = zoneStatus?.state ?? "stopped";
+  // Local optimistic copy, not the sole source of truth: the daemon now
+  // reports its own is_looping on every zone_status (see zonesStore.ts),
+  // which is what actually drove playback all along -- this card's toggle
+  // used to be a plain useState that only this window ever wrote to, so a
+  // second HMI window, or a reconnect mid-show, silently showed the wrong
+  // value. Synced below rather than read directly so a click still feels
+  // instant instead of waiting on the next tick's broadcast.
+  const reportedLooping = zoneStatus?.is_looping;
+  const [loopEnabled, setLoopEnabled] = useState(reportedLooping ?? false);
+  useEffect(() => {
+    if (reportedLooping !== undefined) setLoopEnabled(reportedLooping);
+  }, [reportedLooping]);
   const currentScenario = scenarios.find((s) => s.scenario_id === selectedScenarioId) ?? null;
   const label = zone.name?.trim() || `Zone ${zone.zone_id}`;
 

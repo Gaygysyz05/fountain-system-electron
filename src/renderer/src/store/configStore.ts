@@ -21,7 +21,11 @@ interface ConfigStore {
 
   renameZone: (zoneId: number, name: string | null) => Promise<void>;
   deleteZone: (zoneId: number) => Promise<void>;
-  connectZone: (zoneId: number) => Promise<void>;
+  /** Resolves with how many of the zone's driver instances ended up
+   * connected -- the button that calls this used to be pure
+   * fire-and-forget, with nothing telling the operator whether "Connect
+   * All" actually did anything until they noticed the dots on their own. */
+  connectZone: (zoneId: number) => Promise<{ connected: number; total: number }>;
 
   addDriverInstance: (zoneId: number, instanceId: string, driverType: string, config: Record<string, unknown>) => Promise<void>;
   removeDriverInstance: (zoneId: number, instanceId: string) => Promise<void>;
@@ -80,6 +84,11 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
   connectZone: async (zoneId) => {
     await useConnectionStore.getState().sendCommand({ command: "CONNECT_ZONE", zone_id: zoneId });
     await get().loadZones();
+    // get() here, not the `zones` a caller may have destructured earlier --
+    // that snapshot predates the loadZones() above and would report last
+    // attempt's result, not this one's.
+    const instances = get().zones.find((z) => z.zone_id === zoneId)?.driver_instances ?? [];
+    return { connected: instances.filter((i) => i.connected).length, total: instances.length };
   },
 
   renameZone: async (zoneId, name) => {
