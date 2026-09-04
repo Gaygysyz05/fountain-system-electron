@@ -71,11 +71,17 @@ export function AppShell(): JSX.Element {
         <button
           ref={menuButtonRef}
           onClick={toggleMenu}
-          className={`mr-md rounded-control px-xs py-1 font-medium ${
+          className={`mr-md flex items-center gap-1 rounded-control px-sm py-1 font-medium ${
             view === "settings" || menuAnchor ? "bg-bg-surface3 text-text-primary" : "text-text-secondary hover:bg-bg-surface2 hover:text-text-primary"
           }`}
         >
           Fountain Control
+          {/* Small enough to read as "this opens something" without
+              becoming a second focal point next to the app name --
+              text-text-muted rather than inheriting the button's own
+              (sometimes highlighted) color. Flips to point up while the
+              menu is open, the usual dropdown convention. */}
+          <span className={`text-[10px] text-text-muted transition-transform ${menuAnchor ? "rotate-180" : ""}`}>▾</span>
         </button>
         <ViewTab label="Timeline" active={view === "timeline"} onClick={() => setView("timeline")} />
         <ViewTab label="Playback" active={view === "playback"} onClick={() => setView("playback")} />
@@ -92,6 +98,7 @@ export function AppShell(): JSX.Element {
           x={menuAnchor.x}
           y={menuAnchor.y}
           onClose={() => setMenuAnchor(null)}
+          minWidthClassName="min-w-28"
           sections={[[{ label: "Settings", onClick: () => setView("settings") }]]}
         />
       )}
