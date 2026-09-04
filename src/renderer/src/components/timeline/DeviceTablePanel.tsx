@@ -64,9 +64,9 @@ function computeEffectiveRow(sortedEvents: ScenarioEvent[], rowTimes: number[]):
  * ({frequency, active}) even though the tab itself isn't literally
  * category "motor", so callers pass whichever category actually matches
  * the underlying parameter shape. The "Valve pattern…" advanced popover
- * (wave delay/duration) stays valve-only, same scope the original had
- * (Apply Pattern only existed in FountainValveTableWidget's context menu,
- * not the motor/light/nozzle tables).
+ * stays valve-only, same scope the original had (Apply Pattern only
+ * existed in FountainValveTableWidget's context menu, not the
+ * motor/light/nozzle tables).
  */
 export function DeviceTablePanel({
   category,

@@ -79,27 +79,23 @@ export function summarizeState(category: DeviceType, parameters: Record<string, 
 //
 // Directly answers "open only even valves, close odd" (a one-off bulk
 // assignment -- select the channels, pick On/Off, Apply) and "make some
-// kind of animation" (Wave: a chase across channels; Alternate: a flashing
-// pattern that flips every step) -- the wave/alternating pattern
-// generators the original codebase had (component_tables.py) and the very
-// first audit flagged as "worth keeping" but this project never got around
-// to building until now. (component_tables.py also had a Cascade pattern --
-// exactly one channel on at a time, rotating through the selection -- but
-// nothing here ever surfaced it as a real, guided option, only as a
-// same-named right-click item with no parameters of its own; dropped
-// rather than kept half-wired.)
+// kind of animation" (Alternate: a flashing pattern that flips every step)
+// -- the alternating pattern generator the original codebase had
+// (component_tables.py) and the very first audit flagged as "worth
+// keeping" but this project never got around to building until now.
+// (component_tables.py also had Wave/Cascade patterns -- a timed chase
+// and exactly-one-channel-on-at-a-time across the selection -- neither
+// carried over here.)
 
-export type ValvePatternType = "constant" | "wave" | "alternate";
+export type ValvePatternType = "constant" | "alternate";
 
 export interface ValvePatternOptions {
-  deviceIds: string[]; // order matters for wave/alternate
+  deviceIds: string[]; // order matters for "alternate"
   startTime: number;
   endTime: number;
   stepInterval: number;
   pattern: ValvePatternType;
   constantOn?: boolean; // for "constant"
-  waveDelay?: number; // for "wave": seconds between each channel's activation
-  onDuration?: number; // for "wave": how long each channel stays on
   field?: string; // parameter key to toggle -- "on" for valves, "active" for motors
 }
 
@@ -113,18 +109,6 @@ export function generateValvePattern(opts: ValvePatternOptions): Array<{ time: n
   if (opts.pattern === "constant") {
     const on = opts.constantOn ?? true;
     out.push(...opts.deviceIds.map((id) => ({ time: roundTime(opts.startTime), device_id: id, on })));
-    return out;
-  }
-
-  if (opts.pattern === "wave") {
-    const delay = Math.max(0.1, opts.waveDelay ?? 0.5);
-    const onDuration = Math.max(0.1, opts.onDuration ?? delay);
-    opts.deviceIds.forEach((id, index) => {
-      const onAt = roundTime(opts.startTime + index * delay);
-      const offAt = roundTime(onAt + onDuration);
-      if (onAt <= opts.endTime) out.push({ time: onAt, device_id: id, on: true });
-      if (offAt <= opts.endTime) out.push({ time: offAt, device_id: id, on: false });
-    });
     return out;
   }
 

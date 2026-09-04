@@ -8,8 +8,8 @@ const buttonClass = "h-control rounded-control border border-border bg-bg-surfac
 /**
  * Bulk / animated valve editing -- directly answers "open only even valves,
  * close odd" (select the channels, "Set constant", Apply) and "make some
- * kind of animation" (Wave/Alternate) without hand-placing one grid cell per
- * channel per moment. This is the wave/alternating pattern feature the
+ * kind of animation" (Alternate) without hand-placing one grid cell per
+ * channel per moment. This is the alternating pattern feature the
  * original codebase had (component_tables.py) that the very first audit
  * flagged as worth keeping but this project never built until now.
  */
@@ -30,8 +30,6 @@ export function PatternTool({
   const [stepInterval, setStepInterval] = useState(1);
   const [pattern, setPattern] = useState<ValvePatternType>("constant");
   const [constantOn, setConstantOn] = useState(true);
-  const [waveDelay, setWaveDelay] = useState(0.5);
-  const [onDuration, setOnDuration] = useState(0.5);
 
   function toggle(id: string): void {
     setSelected((prev) => {
@@ -55,8 +53,6 @@ export function PatternTool({
       stepInterval,
       pattern,
       constantOn,
-      waveDelay,
-      onDuration,
     });
     onClose();
   }
@@ -99,7 +95,6 @@ export function PatternTool({
           <span className="text-text-secondary">Pattern</span>
           <select value={pattern} onChange={(e) => setPattern(e.target.value as ValvePatternType)} className={inputClass}>
             <option value="constant">Set constant</option>
-            <option value="wave">Wave (chase)</option>
             <option value="alternate">Alternate (flash)</option>
           </select>
         </label>
@@ -109,19 +104,6 @@ export function PatternTool({
             <input type="checkbox" checked={constantOn} onChange={(e) => setConstantOn(e.target.checked)} className="h-3 w-3 accent-accent" />
             <span className="text-text-secondary">On (unchecked = Off)</span>
           </label>
-        )}
-
-        {pattern === "wave" && (
-          <>
-            <label className="flex flex-col gap-1 text-xs">
-              <span className="text-text-secondary">Delay/channel (s)</span>
-              <input type="number" min={0.1} step={0.1} value={waveDelay} onChange={(e) => setWaveDelay(parseFloat(e.target.value) || 0.5)} className={`${inputClass} w-24`} />
-            </label>
-            <label className="flex flex-col gap-1 text-xs">
-              <span className="text-text-secondary">On duration (s)</span>
-              <input type="number" min={0.1} step={0.1} value={onDuration} onChange={(e) => setOnDuration(parseFloat(e.target.value) || 0.5)} className={`${inputClass} w-24`} />
-            </label>
-          </>
         )}
 
         {pattern === "alternate" && (
