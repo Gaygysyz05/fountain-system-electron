@@ -47,6 +47,12 @@ interface TimelineStore {
   setGridEventsBulk: (entries: Array<{ deviceId: string; time: number; parameters: Record<string, unknown> }>) => void;
   removeGridEventsBulk: (entries: Array<{ deviceId: string; time: number }>) => void;
   applyValvePattern: (options: ValvePatternOptions) => void;
+  /** Replaces one device's whole ON-span list for `field` (piano-roll
+   * editor -- see PianoRollEditor.tsx) with a fresh, non-overlapping set of
+   * on/off boundary events. Spans are the editor's overlap-safe local
+   * output, not raw drag deltas -- this just has to reconcile them against
+   * whatever's currently in `events`, not re-derive safety itself. */
+  commitChannelSpans: (deviceId: string, field: string, spans: Array<{ start: number; end: number }>) => void;
 }
 
 /** Upserts `entries` into an events array, returning a new array. Shared by
@@ -195,6 +201,59 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       });
       return {
         file: { ...s.file, events: upsertEvents(s.file.events, entries) },
+        past: [...s.past, s.file.events].slice(-HISTORY_LIMIT),
+        future: [],
+        dirty: true,
+      };
+    }),
+
+  commitChannelSpans: (deviceId, field, spans) =>
+    set((s) => {
+      // Boundary times this device+field explicitly has RIGHT NOW -- some of
+      // these won't survive the edit (a span that got resized away from a
+      // moment, or deleted outright) and must be removed, not just
+      // shadowed, or the grid/pattern tool would still see a stale event
+      // there. `s.file.events`, not a snapshot passed in -- always reconciles
+      // against whatever's actually in the store at commit time.
+      const before = new Set(s.file.events.filter((e) => e.device_id === deviceId && field in e.parameters).map((e) => e.time));
+
+      // Rebuilt from `spans` alone (already overlap-free -- see
+      // PianoRollEditor's neighbor-clamped dragging) rather than patching
+      // individual timestamps. Touching spans (a resize/move dragged flush
+      // against its neighbor, end_A === start_B) are merged here BEFORE
+      // generating boundaries -- generating both unconditionally would
+      // still leave a harmless-looking but redundant on:true sitting at
+      // that shared instant (later span's start overwriting the earlier
+      // span's end in a Map lands on the right VALUE, but doesn't remove
+      // the entry), which is exactly the kind of stray boundary event this
+      // action exists to not leave behind.
+      const sorted = [...spans].sort((a, b) => a.start - b.start);
+      const merged: Array<{ start: number; end: number }> = [];
+      for (const span of sorted) {
+        const last = merged[merged.length - 1];
+        if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+        else merged.push({ ...span });
+      }
+
+      const after = new Map<number, boolean>();
+      for (const span of merged) {
+        after.set(span.start, true);
+        after.set(span.end, false);
+      }
+
+      const removeEntries = [...before].filter((t) => !after.has(t)).map((time) => ({ deviceId, time }));
+      const setEntries = [...after.entries()].map(([time, value]) => {
+        const existing = s.file.events.find((e) => e.device_id === deviceId && e.time === time);
+        return { deviceId, time, parameters: { ...(existing?.parameters ?? {}), [field]: value } };
+      });
+
+      const keys = new Set(removeEntries.map((e) => `${e.deviceId} ${e.time}`));
+      const events = upsertEvents(
+        s.file.events.filter((e) => !keys.has(`${e.device_id} ${e.time}`)),
+        setEntries,
+      );
+      return {
+        file: { ...s.file, events },
         past: [...s.past, s.file.events].slice(-HISTORY_LIMIT),
         future: [],
         dirty: true,

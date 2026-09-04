@@ -4,6 +4,7 @@ import type { ScenarioEvent } from "../../lib/scenario";
 import type { DeviceType, DriverInstanceDto } from "../../lib/protocol";
 import { DeviceTable } from "./DeviceTable";
 import { PatternTool } from "./PatternTool";
+import { PianoRollEditor } from "./PianoRollEditor";
 import type { DeviceColumn } from "./deviceColumns";
 
 function roundTime(t: number): number {
@@ -82,6 +83,13 @@ export function DeviceTablePanel({
 
   const [step, setStep] = useState(1);
   const [showPatternTool, setShowPatternTool] = useState(false);
+  // Grid stays the default every time this mounts -- an operator who's
+  // used this screen for months should see exactly what they've always
+  // seen unless they deliberately reach for Timeline. Valve-only for now,
+  // same scope PatternTool already has (a motor's "active" field could get
+  // this later, but its grid columns aren't purely toggle -- Hz shares the
+  // table -- so it needs its own look at how the two should coexist first).
+  const [mode, setMode] = useState<"grid" | "timeline">("grid");
 
   const rowTimes = useMemo(() => {
     const times: number[] = [];
@@ -174,30 +182,57 @@ export function DeviceTablePanel({
   return (
     <div className="flex min-h-0 flex-1 flex-col p-md">
       <div className="mb-sm flex flex-wrap items-center gap-sm">
-        <label className="flex items-center gap-xs text-sm text-text-secondary">
-          Step
-          <input
-            type="number"
-            min={0.1}
-            step={0.1}
-            value={step}
-            onChange={(e) => setStep(Math.max(0.1, parseFloat(e.target.value) || 1))}
-            className="h-input w-20 rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
-          />
-          s
-        </label>
         {category === "valve" && (
-          <button
-            onClick={() => setShowPatternTool((v) => !v)}
-            className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm text-text-primary hover:bg-bg-surface2"
-          >
-            Valve pattern…
-          </button>
+          <div className="flex overflow-hidden rounded-control border border-border">
+            <button
+              onClick={() => setMode("grid")}
+              title="Dense per-time-step spreadsheet -- precise, one click per moment"
+              className={`px-sm py-1 text-sm ${mode === "grid" ? "bg-accent text-text-primary" : "bg-bg-surface3 text-text-secondary hover:bg-bg-surface2"}`}
+            >
+              Grid
+            </button>
+            <button
+              onClick={() => setMode("timeline")}
+              title="Drag directly on a channel's row to paint how long it's open -- faster for shaping a show, less precise than typing an exact tick"
+              className={`px-sm py-1 text-sm ${mode === "timeline" ? "bg-accent text-text-primary" : "bg-bg-surface3 text-text-secondary hover:bg-bg-surface2"}`}
+            >
+              Timeline
+            </button>
+          </div>
         )}
-        <span className="text-xs text-text-muted">
-          Drag or click a header to select, arrow keys to move, right-click for bulk actions, Ctrl+C/Ctrl+V to copy/paste.
-          {minToggleInterval > 0 && <> A <span className="text-warning">▸</span> corner marks a toggle faster than this relay's {minToggleInterval}s minimum.</>}
-        </span>
+        {mode === "grid" && (
+          <>
+            <label className="flex items-center gap-xs text-sm text-text-secondary">
+              Step
+              <input
+                type="number"
+                min={0.1}
+                step={0.1}
+                value={step}
+                onChange={(e) => setStep(Math.max(0.1, parseFloat(e.target.value) || 1))}
+                className="h-input w-20 rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+              />
+              s
+            </label>
+            {category === "valve" && (
+              <button
+                onClick={() => setShowPatternTool((v) => !v)}
+                className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm text-text-primary hover:bg-bg-surface2"
+              >
+                Valve pattern…
+              </button>
+            )}
+            <span className="text-xs text-text-muted">
+              Drag or click a header to select, arrow keys to move, right-click for bulk actions, Ctrl+C/Ctrl+V to copy/paste.
+              {minToggleInterval > 0 && <> A <span className="text-warning">▸</span> corner marks a toggle faster than this relay's {minToggleInterval}s minimum.</>}
+            </span>
+          </>
+        )}
+        {mode === "timeline" && (
+          <span className="text-xs text-text-muted">
+            Drag on a row to paint how long a valve is open. Drag an edge to resize, the middle to move. Click a span, then Delete to remove it. Spans can't overlap on the same valve.
+          </span>
+        )}
       </div>
 
       {instances.length > 0 && (
@@ -215,17 +250,27 @@ export function DeviceTablePanel({
         </div>
       )}
 
-      {showPatternTool && category === "valve" && (
-        <PatternTool
+      {mode === "grid" ? (
+        <>
+          {showPatternTool && category === "valve" && (
+            <PatternTool
+              devices={columns.filter((c) => c.kind === "toggle").map((c) => ({ device_id: c.deviceId, label: c.label }))}
+              duration={duration}
+              onClose={() => setShowPatternTool(false)}
+            />
+          )}
+          <div className="min-h-0 flex-1 overflow-auto">
+            <DeviceTable category={category} columns={columns} rowTimes={rowTimes} getEffective={getEffective} hasExplicit={hasExplicit} isFlagged={isFlagged} />
+          </div>
+        </>
+      ) : (
+        <PianoRollEditor
+          category={category}
+          field="on"
           devices={columns.filter((c) => c.kind === "toggle").map((c) => ({ device_id: c.deviceId, label: c.label }))}
           duration={duration}
-          onClose={() => setShowPatternTool(false)}
         />
       )}
-
-      <div className="min-h-0 flex-1 overflow-auto">
-        <DeviceTable category={category} columns={columns} rowTimes={rowTimes} getEffective={getEffective} hasExplicit={hasExplicit} isFlagged={isFlagged} />
-      </div>
     </div>
   );
 }
