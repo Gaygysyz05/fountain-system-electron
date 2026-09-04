@@ -8,6 +8,7 @@ import asyncio
 from app.event_bus import EventBus
 from app.zones.models import Event, Project
 from app.zones.scenario_player import ZoneScenarioPlayer
+from tests.fakes.fake_audio import FakeAudioPlayer
 
 
 def _make_player() -> tuple[ZoneScenarioPlayer, list[Event]]:
@@ -80,6 +81,28 @@ async def test_loop_wraps_position_and_replays_events() -> None:
     await player.stop()
 
     assert len(received) >= 2  # the t=0 event fired again after each wrap
+
+
+async def test_loop_restarts_the_music_track_on_each_wrap() -> None:
+    """AudioPlayer.play() is a play-ONCE call (see audio.py) -- looping the
+    valve/motor schedule via reset() alone left the track to play through
+    to its natural end and go silent while the show kept looping around
+    it. Each wrap must call play() again to restart the track alongside
+    the hardware schedule, on the scenario player's own tick clock."""
+    player, _ = _make_player()
+    fake_audio = FakeAudioPlayer()
+    player.audio = fake_audio  # type: ignore[assignment]
+    project = Project(duration=0.1, events=[], music_file="show.mp3")
+    player.load_project(project, "s1")
+    player.is_looping = True
+
+    await player.play()
+    assert fake_audio.play_count == 1  # the initial play, from play() itself
+
+    await asyncio.sleep(0.35)  # several loop cycles at tick_interval=0.02/duration=0.1
+    await player.stop()
+
+    assert fake_audio.play_count >= 3  # initial play + at least 2 wraps
 
 
 async def test_non_looping_playback_stops_at_duration() -> None:

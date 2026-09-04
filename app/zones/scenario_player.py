@@ -206,6 +206,21 @@ class ZoneScenarioPlayer:
                 if self.current_position >= self.project.duration:
                     if self.is_looping:
                         self.reset()
+                        # reset() only rewinds the EVENT clock -- the track
+                        # itself was started once, back in play(), with no
+                        # loop count of its own (AudioPlayer.play() is a
+                        # play-once call), so without this it plays through
+                        # to its natural end and goes silent while valves/
+                        # motors keep looping around it. Restarting it here,
+                        # on the exact tick the scenario itself wraps,
+                        # keeps audio and hardware on the one shared clock
+                        # this whole player exists to guarantee (see
+                        # audio.py's own docstring) -- not on the audio
+                        # engine's own loop timing, which would drift from
+                        # the scenario's if the track and project.duration
+                        # aren't frame-identical.
+                        if self._loaded_music_file:
+                            await self.audio.play()
                     else:
                         self.current_position = self.project.duration
                         self.is_playing = False
