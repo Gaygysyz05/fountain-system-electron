@@ -9,8 +9,9 @@ import { PlaybackPanel } from "../playback/PlaybackPanel";
 import { TimelinePanel } from "../timeline/TimelinePanel";
 import { SchedulePanel } from "../schedule/SchedulePanel";
 import { AuditLogPanel } from "../log/AuditLogPanel";
+import { SettingsPanel } from "../settings/SettingsPanel";
 
-type View = "timeline" | "playback" | "preview" | "devices" | "schedule" | "log";
+type View = "timeline" | "playback" | "preview" | "devices" | "schedule" | "log" | "settings";
 
 /**
  * VS Code-shaped shell: menu/toolbar row, sidebar + main content, status bar.
@@ -55,6 +56,7 @@ export function AppShell(): JSX.Element {
         <ViewTab label="Preview" active={view === "preview"} onClick={() => setView("preview")} />
         <ViewTab label="Schedule" active={view === "schedule"} onClick={() => setView("schedule")} />
         <ViewTab label="Log" active={view === "log"} onClick={() => setView("log")} />
+        <ViewTab label="Settings" active={view === "settings"} onClick={() => setView("settings")} />
         <div className="flex-1" />
         <EmergencyStopButton />
       </header>
@@ -77,6 +79,7 @@ export function AppShell(): JSX.Element {
             {view === "preview" && <ScenePreview />}
             {view === "schedule" && <SchedulePanel />}
             {view === "log" && <AuditLogPanel />}
+            {view === "settings" && <SettingsPanel />}
           </ErrorBoundary>
         </main>
       </div>

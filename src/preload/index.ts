@@ -30,4 +30,13 @@ contextBridge.exposeInMainWorld("electron", {
   // own spawn/restart lifecycle lines) to a file the operator picks via a
   // native save dialog -- on-site diagnostics without a dev terminal.
   exportLogs: (): Promise<{ ok: boolean; path?: string; error?: string | null }> => ipcRenderer.invoke("export-logs"),
+
+  // "Start automatically when Windows starts" -- see main/index.ts's
+  // configureAutoLaunch/get-auto-launch/set-auto-launch for why this reads
+  // and writes app.getLoginItemSettings() directly rather than a settings
+  // value of its own. `supported` is false in `electron-vite dev` (there is
+  // no installed .exe to register), letting the Settings screen show the
+  // toggle disabled with an explanation instead of it silently doing nothing.
+  getAutoLaunch: (): Promise<{ enabled: boolean; supported: boolean }> => ipcRenderer.invoke("get-auto-launch"),
+  setAutoLaunch: (enabled: boolean): Promise<void> => ipcRenderer.invoke("set-auto-launch", enabled),
 });

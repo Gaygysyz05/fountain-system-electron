@@ -1,8 +1,43 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import { isAbsolute, join, relative, resolve } from "path";
 import { spawn, type ChildProcess } from "child_process";
-import { writeFile } from "fs/promises";
+import { writeFile, readFile } from "fs/promises";
 import { is } from "@electron-toolkit/utils";
+
+// -- app settings (this shell's own preferences, not the daemon's hardware
+// config) ---------------------------------------------------------------
+//
+// One small JSON file under userData -- not worth a dependency for a
+// single boolean today. Currently holds only whether the "start
+// automatically" default (below) has already been applied once; the
+// Settings screen's own reads/writes of the actual login-item state go
+// straight through app.getLoginItemSettings()/setLoginItemSettings(),
+// which is ALREADY the persisted, OS-level source of truth for that --
+// duplicating it into this file would just be a second copy that could
+// drift from what Windows actually has registered.
+interface AppSettings {
+  autoLaunchDefaultApplied?: boolean;
+}
+
+function settingsFilePath(): string {
+  return join(app.getPath("userData"), "settings.json");
+}
+
+async function readAppSettings(): Promise<AppSettings> {
+  try {
+    return JSON.parse(await readFile(settingsFilePath(), "utf-8")) as AppSettings;
+  } catch {
+    return {};
+  }
+}
+
+async function writeAppSettings(settings: AppSettings): Promise<void> {
+  try {
+    await writeFile(settingsFilePath(), JSON.stringify(settings, null, 2), "utf-8");
+  } catch (err) {
+    logLine(`[settings] failed to write settings.json (${err instanceof Error ? err.message : String(err)})`);
+  }
+}
 
 // -- log ring buffer -------------------------------------------------------
 //
@@ -345,11 +380,38 @@ async function stopDaemonGracefully(): Promise<void> {
 // Packaged build only -- never touch the developer's own login items while
 // iterating via `electron-vite dev`. A power flicker or a Windows Update
 // reboot on the site PC would otherwise leave the fountain control panel
-// closed until someone walks over and starts it by hand.
-function configureAutoLaunch(): void {
+// closed until someone walks over and starts it by hand -- so a fresh
+// install defaults to on. Only a DEFAULT, though: it must apply once and
+// then get out of the way, or an operator who deliberately turns this off
+// in Settings (below) would find it silently switched back on the very
+// next launch. autoLaunchDefaultApplied is the marker that's already happened.
+async function configureAutoLaunch(): Promise<void> {
   if (is.dev) return;
+  const settings = await readAppSettings();
+  if (settings.autoLaunchDefaultApplied) return;
   app.setLoginItemSettings({ openAtLogin: true, path: process.execPath });
+  await writeAppSettings({ ...settings, autoLaunchDefaultApplied: true });
 }
+
+// Settings screen's auto-launch toggle -- app.getLoginItemSettings() IS the
+// persisted state (Windows' own registered startup entry), so "read" just
+// asks Electron, no local copy to keep in sync. Also reports `supported`:
+// in `electron-vite dev`, process.execPath is the dev Electron binary
+// itself, not this app -- registering THAT as a login item would silently
+// launch node_modules/electron.exe with no arguments on every boot, so the
+// write side no-ops and the renderer disables the toggle instead.
+ipcMain.handle("get-auto-launch", () => ({
+  enabled: app.getLoginItemSettings().openAtLogin,
+  supported: !is.dev,
+}));
+
+ipcMain.handle("set-auto-launch", async (_event, enabled: boolean) => {
+  if (is.dev) return;
+  app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath });
+  // The operator has now made an explicit choice -- the on-by-default
+  // above must never override it again, whichever way they set it.
+  await writeAppSettings({ ...(await readAppSettings()), autoLaunchDefaultApplied: true });
+});
 
 // gotSingleInstanceLock is false only when app.quit() was already called
 // above (a second launch handing off to the first) -- whenReady would still
@@ -358,7 +420,7 @@ function configureAutoLaunch(): void {
 if (gotSingleInstanceLock) {
   void app.whenReady().then(() => {
     createWindow();
-    configureAutoLaunch();
+    void configureAutoLaunch();
     void startDaemon();
 
     app.on("activate", () => {

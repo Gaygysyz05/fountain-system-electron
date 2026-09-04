@@ -21,5 +21,7 @@ interface Window {
     getDaemonStatus: () => Promise<DaemonStatus>;
     onDaemonStatus: (callback: (status: DaemonStatus) => void) => () => void;
     exportLogs: () => Promise<{ ok: boolean; path?: string; error?: string | null }>;
+    getAutoLaunch: () => Promise<{ enabled: boolean; supported: boolean }>;
+    setAutoLaunch: (enabled: boolean) => Promise<void>;
   };
 }
