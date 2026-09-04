@@ -6,6 +6,7 @@ import { useConnectionStore } from "../../store/connectionStore";
 import type { ScheduleEntryDto, ScheduleEntryInput, ScenarioDto, ZoneConfigDto } from "../../lib/protocol";
 
 const DAY_LABELS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const DAY_LETTERS = ["M", "T", "W", "T", "F", "S", "S"];
 
 function timeToMinutes(t: string): number {
   const [h, m] = t.split(":").map(Number);
@@ -49,9 +50,10 @@ function daysOverlap(a: number[], b: number[]): boolean {
 }
 
 /** Other ENABLED entries in the same zone whose day-sets and time windows
- * (time .. time + scenario duration) overlap this candidate -- checked
- * before Add/Save so double-booking a zone is a deliberate choice, not a
- * surprise discovered when two shows collide live. */
+ * (time .. time + scenario duration) overlap this candidate -- surfaced
+ * live in the form (see OverlapWarning) so double-booking a zone is a
+ * choice made with the collision already visible, not a surprise
+ * discovered when two shows collide live. */
 function findOverlaps(
   candidate: { zoneId: number; time: string; days: number[]; durationMinutes: number },
   entries: ScheduleEntryDto[],
@@ -73,11 +75,12 @@ function findOverlaps(
  * Scheduled playback -- "Zone 1 / show X every day at 20:00" -- backed by
  * GET/POST/PUT/DELETE /schedule (see app/main.py + persistence.py's
  * ScheduleEntryDto). The daemon checks these against the wall clock every
- * 20s on its own; this panel is CRUD on the list plus a couple of things
- * that make a growing list actually manageable: sorted by time, each row's
- * real next-fire computed client-side, an overlap check before saving, and
- * a "Test now" that plays the entry's scenario immediately without waiting
- * for (or touching) its actual scheduled time.
+ * 20s on its own; this panel is CRUD on the list plus what makes a growing
+ * list actually manageable: sorted by time, each row's real next-fire
+ * computed client-side, an overlap warning visible WHILE authoring an entry
+ * (not a browser confirm() after the fact), a "Test now" that plays the
+ * entry's scenario immediately without waiting for (or touching) its actual
+ * scheduled time, and in-place editing of an existing entry.
  */
 export function SchedulePanel(): JSX.Element {
   const { entries, loading, error, loadSchedule, createEntry, updateEntry, deleteEntry } = useScheduleStore();
@@ -86,6 +89,7 @@ export function SchedulePanel(): JSX.Element {
   const scenarios = useScenariosStore((s) => s.scenarios);
   const loadScenarios = useScenariosStore((s) => s.loadScenarios);
   const sendCommand = useConnectionStore((s) => s.sendCommand);
+  const [creating, setCreating] = useState(false);
   const [editingEntryId, setEditingEntryId] = useState<string | null>(null);
 
   // Drives "next run" labels -- doesn't need to be second-accurate, just
@@ -104,77 +108,130 @@ export function SchedulePanel(): JSX.Element {
 
   const sortedEntries = [...entries].sort((a, b) => timeToMinutes(a.time) - timeToMinutes(b.time));
   const editingEntry = entries.find((e) => e.id === editingEntryId) ?? null;
+  const formOpen = creating || editingEntry !== null;
+
+  function zoneName(zoneId: number): string {
+    return zones.find((z) => z.zone_id === zoneId)?.name?.trim() || `Zone ${zoneId}`;
+  }
+
+  // Header subhead: "N active · Next: <whichever fires soonest>" -- an
+  // operator glancing at this tab wants "is anything about to happen"
+  // without reading every row's own next-run time.
+  const activeCount = entries.filter((e) => e.enabled).length;
+  const soonest = entries
+    .map((e) => ({ entry: e, next: computeNextRun(e, now) }))
+    .filter((x): x is { entry: ScheduleEntryDto; next: Date } => x.next !== null)
+    .sort((a, b) => a.next.getTime() - b.next.getTime())[0];
 
   async function handleTestNow(entry: ScheduleEntryDto): Promise<void> {
     await sendCommand({ command: "PLAY_SCENARIO", zone_id: entry.zone_id, scenario_id: entry.scenario_id });
   }
 
-  /** Shared by both Add and Save: warns (with a chance to back out) if the
-   * candidate overlaps another enabled entry in the same zone, then
-   * delegates to whichever daemon call the caller passed in. */
-  async function submitWithOverlapCheck(
-    input: ScheduleEntryInput,
-    excludeId: string | undefined,
-    apply: () => Promise<void>,
-  ): Promise<void> {
-    const durationMinutes = (scenarios.find((s) => s.scenario_id === input.scenario_id)?.duration ?? 0) / 60;
-    const overlaps = findOverlaps({ zoneId: input.zone_id, time: input.time, days: input.days, durationMinutes }, entries, scenarios, excludeId);
-    if (overlaps.length > 0) {
-      const names = overlaps.map((o) => `${o.time} ${o.scenario_id}`).join(", ");
-      if (!window.confirm(`This overlaps ${overlaps.length} other scheduled show(s) in the same zone (${names}). Save anyway?`)) return;
+  function openCreate(): void {
+    setEditingEntryId(null);
+    setCreating(true);
+  }
+
+  function closeForm(): void {
+    setCreating(false);
+    setEditingEntryId(null);
+  }
+
+  async function handleSubmit(input: ScheduleEntryInput): Promise<void> {
+    if (editingEntryId) {
+      await updateEntry(editingEntryId, input);
+    } else {
+      await createEntry(input);
     }
-    await apply();
+    closeForm();
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-lg overflow-y-auto p-lg">
-      <h2 className="text-lg font-medium text-text-primary">Schedule</h2>
-      {error && <p className="text-sm text-danger">{error}</p>}
-      {loading && entries.length === 0 && <p className="text-sm text-text-muted">Loading…</p>}
-      {entries.length === 0 && !loading && (
-        <p className="text-sm text-text-muted">No scheduled playback yet -- add one below.</p>
-      )}
-      {zones.length > 0 && scenarios.length === 0 && (
-        <p className="text-sm text-text-muted">No saved scenarios yet -- create one on the Timeline tab first.</p>
-      )}
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="flex shrink-0 items-start justify-between px-xl pb-md pt-lg">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-[20px] font-semibold text-text-primary">Schedule</h1>
+          {entries.length > 0 && (
+            <div className="flex items-center gap-sm text-base text-text-muted">
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-success" />
+                {activeCount} active
+              </span>
+              {soonest && (
+                <>
+                  <span className="text-border-separator">·</span>
+                  <span>
+                    Next:{" "}
+                    <strong className="font-medium text-text-secondary">
+                      {zoneName(soonest.entry.zone_id)} — {soonest.entry.scenario_id}, {formatNextRun(soonest.next, now)}
+                    </strong>
+                  </span>
+                </>
+              )}
+            </div>
+          )}
+        </div>
+        <button
+          onClick={openCreate}
+          className="flex h-control shrink-0 items-center gap-1.5 rounded-control bg-primary px-md text-base font-medium text-text-primary hover:bg-primary-hover"
+        >
+          <span className="text-md leading-none">+</span> New Schedule
+        </button>
+      </div>
 
-      <ul className="flex flex-col gap-xs">
-        {sortedEntries.map((entry) => (
-          <ScheduleRow
-            key={entry.id}
-            entry={entry}
-            zoneName={zones.find((z) => z.zone_id === entry.zone_id)?.name?.trim() || `Zone ${entry.zone_id}`}
-            nextRun={computeNextRun(entry, now)}
-            now={now}
-            editing={editingEntryId === entry.id}
-            onToggleEnabled={() => void updateEntry(entry.id, { enabled: !entry.enabled })}
-            onDelete={() => void deleteEntry(entry.id)}
-            onEdit={() => setEditingEntryId(entry.id)}
-            onTestNow={() => void handleTestNow(entry)}
-          />
-        ))}
-      </ul>
+      {error && <p className="px-xl text-base text-danger">{error}</p>}
 
-      <ScheduleEntryForm
-        key={editingEntryId ?? "new"} // remount on entering/leaving edit mode -- a fresh set of local state per entry, not one form silently carrying over stale values
-        zones={zones}
-        scenarios={scenarios}
-        initial={editingEntry}
-        onCancel={editingEntryId ? () => setEditingEntryId(null) : undefined}
-        onSubmit={async (input) => {
-          if (editingEntryId) {
-            await submitWithOverlapCheck(input, editingEntryId, () => updateEntry(editingEntryId, input));
-            setEditingEntryId(null);
-          } else {
-            await submitWithOverlapCheck(input, undefined, () => createEntry(input));
-          }
-        }}
-      />
+      <div className="min-h-0 flex-1 overflow-y-auto px-xl pb-xl">
+        <div className="mx-auto flex max-w-[920px] flex-col gap-sm">
+          {loading && entries.length === 0 && <p className="text-base text-text-muted">Loading…</p>}
+
+          {entries.length === 0 && !loading && !formOpen && (
+            <div className="flex flex-col items-center gap-xs rounded-[8px] border border-dashed border-border py-xl text-center">
+              <span className="text-base text-text-secondary">No scheduled playback yet</span>
+              <span className="text-base text-text-muted">Add a show to run automatically, on its own days and time.</span>
+            </div>
+          )}
+
+          {zones.length > 0 && scenarios.length === 0 && (
+            <p className="text-base text-text-muted">No saved scenarios yet -- create one on the Timeline tab first.</p>
+          )}
+
+          {sortedEntries.map((entry) => (
+            <ScheduleCard
+              key={entry.id}
+              entry={entry}
+              zoneName={zoneName(entry.zone_id)}
+              nextRun={computeNextRun(entry, now)}
+              now={now}
+              editing={editingEntryId === entry.id}
+              onToggleEnabled={() => void updateEntry(entry.id, { enabled: !entry.enabled })}
+              onDelete={() => void deleteEntry(entry.id)}
+              onEdit={() => {
+                setCreating(false);
+                setEditingEntryId(entry.id);
+              }}
+              onTestNow={() => void handleTestNow(entry)}
+            />
+          ))}
+
+          {formOpen && (
+            <ScheduleEntryForm
+              key={editingEntryId ?? "new"} // remount on entering/leaving edit mode -- a fresh set of local state per entry, not one form silently carrying over stale values
+              zones={zones}
+              scenarios={scenarios}
+              entries={entries}
+              initial={editingEntry}
+              onCancel={closeForm}
+              onSubmit={handleSubmit}
+            />
+          )}
+        </div>
+      </div>
     </div>
   );
 }
 
-function ScheduleRow(props: {
+function ScheduleCard(props: {
   entry: ScheduleEntryDto;
   zoneName: string;
   nextRun: Date | null;
@@ -186,54 +243,87 @@ function ScheduleRow(props: {
   onTestNow: () => void;
 }): JSX.Element {
   const { entry } = props;
-  const daysLabel = entry.days.length === 0 ? "Every day" : entry.days.map((d) => DAY_LABELS[d]).join(", ");
   return (
-    <li
-      className={`flex flex-wrap items-center justify-between gap-x-md gap-y-1 rounded-panel border px-md py-sm ${
-        props.editing ? "border-accent bg-bg-surface2" : "border-border bg-bg-surface1"
-      }`}
+    <div
+      className={`flex items-center gap-lg rounded-[8px] border bg-bg-surface1 px-lg py-md shadow-[0_8px_24px_rgba(0,0,0,0.35)] ${
+        props.editing ? "border-accent" : "border-border-light"
+      } ${entry.enabled ? "" : "opacity-55"}`}
     >
-      <div className="flex flex-wrap items-center gap-md text-sm">
-        <button
-          onClick={props.onToggleEnabled}
-          title={entry.enabled ? "Enabled -- click to disable" : "Disabled -- click to enable"}
-          className={`h-2 w-2 shrink-0 rounded-full ${entry.enabled ? "bg-success" : "bg-text-muted"}`}
-        />
-        <span className="font-mono text-text-primary">{entry.time}</span>
-        <span className="text-text-secondary">{props.zoneName}</span>
-        <span className="text-text-secondary">{entry.scenario_id}</span>
-        <span className="text-xs text-text-muted">{daysLabel}</span>
-        <span className="text-xs text-text-muted">
-          {props.nextRun ? `Next: ${formatNextRun(props.nextRun, props.now)}` : "Disabled"}
-        </span>
-        {entry.last_fired_date && <span className="text-xs text-text-muted">last ran {entry.last_fired_date}</span>}
+      <button
+        onClick={props.onToggleEnabled}
+        title={entry.enabled ? "Enabled -- click to disable" : "Disabled -- click to enable"}
+        className={`h-2.5 w-2.5 shrink-0 rounded-full ${entry.enabled ? "bg-success" : "bg-text-disabled"}`}
+      />
+
+      <span className="min-w-[68px] font-mono text-[20px] font-semibold text-text-primary">{entry.time}</span>
+
+      <div className="h-8 w-px shrink-0 bg-border-light" />
+
+      <div className="flex min-w-[190px] flex-col gap-0.5">
+        <span className="text-md font-medium text-text-primary">{entry.scenario_id}</span>
+        <span className="text-base text-text-muted">{props.zoneName}</span>
       </div>
-      <div className="flex flex-wrap items-center gap-sm">
-        <button onClick={props.onTestNow} title="Plays this entry's scenario right now, without waiting for its scheduled time -- doesn't touch last_fired_date" className="text-xs text-accent hover:text-accent-hover">
+
+      <div className="flex gap-1">
+        {DAY_LETTERS.map((letter, i) => (
+          <span
+            key={i}
+            className={`flex h-[22px] w-[22px] items-center justify-center rounded-control text-sm font-semibold ${
+              entry.days.length === 0 || entry.days.includes(i) ? "bg-accent text-text-primary" : "bg-bg-surface3 text-text-disabled"
+            }`}
+          >
+            {letter}
+          </span>
+        ))}
+      </div>
+
+      <div className="flex-1" />
+
+      <div className="flex flex-col items-end gap-0.5">
+        {props.nextRun ? (
+          <span className={`text-base font-medium ${props.nextRun.toDateString() === props.now.toDateString() ? "text-success" : "text-text-secondary"}`}>
+            Next: {formatNextRun(props.nextRun, props.now)}
+          </span>
+        ) : (
+          <span className="text-base font-medium text-text-disabled">Disabled</span>
+        )}
+        <span className="text-sm text-text-disabled">{entry.last_fired_date ? `Last ran ${entry.last_fired_date}` : "Never ran"}</span>
+      </div>
+
+      <div className="h-8 w-px shrink-0 bg-border-light" />
+
+      <div className="flex items-center gap-md">
+        <button
+          onClick={props.onTestNow}
+          title="Plays this entry's scenario right now, without waiting for its scheduled time -- doesn't touch last_fired_date"
+          className="text-base font-medium text-accent hover:text-accent-hover"
+        >
           Test now
         </button>
-        <button onClick={props.onEdit} className="text-xs text-accent hover:text-accent-hover">
+        <button onClick={props.onEdit} className="text-base font-medium text-accent hover:text-accent-hover">
           Edit
         </button>
-        <button onClick={props.onDelete} className="text-xs text-danger hover:text-danger-hover">
+        <button onClick={props.onDelete} className="text-base font-medium text-danger hover:text-danger-hover">
           Delete
         </button>
       </div>
-    </li>
+    </div>
   );
 }
 
 function ScheduleEntryForm(props: {
   zones: ZoneConfigDto[];
   scenarios: ScenarioDto[];
+  entries: ScheduleEntryDto[];
   initial: ScheduleEntryDto | null;
-  onCancel?: () => void;
+  onCancel: () => void;
   onSubmit: (input: ScheduleEntryInput) => Promise<void>;
 }): JSX.Element {
   const [zoneId, setZoneId] = useState<number | null>(props.initial?.zone_id ?? props.zones[0]?.zone_id ?? null);
   const [scenarioId, setScenarioId] = useState(props.initial?.scenario_id ?? props.scenarios[0]?.scenario_id ?? "");
   const [time, setTime] = useState(props.initial?.time ?? "20:00");
   const [days, setDays] = useState<number[]>(props.initial?.days ?? []);
+  const [saving, setSaving] = useState(false);
 
   // Zones/scenarios load asynchronously after mount -- keep the pickers'
   // default selection in sync once they actually arrive, instead of the
@@ -250,15 +340,41 @@ function ScheduleEntryForm(props: {
     setDays((prev) => (prev.includes(day) ? prev.filter((d) => d !== day) : [...prev, day].sort()));
   }
 
+  // Recomputed on every keystroke/pick -- the point of showing this INSIDE
+  // the form instead of a confirm() dialog after Save is clicked: the
+  // operator sees the collision while they're still choosing the time,
+  // not as an interruption after they've already committed to it.
+  const durationMinutes = (props.scenarios.find((s) => s.scenario_id === scenarioId)?.duration ?? 0) / 60;
+  const overlaps =
+    zoneId !== null && scenarioId
+      ? findOverlaps({ zoneId, time, days, durationMinutes }, props.entries, props.scenarios, props.initial?.id)
+      : [];
+
+  async function handleSave(): Promise<void> {
+    if (zoneId === null || !scenarioId) return;
+    setSaving(true);
+    try {
+      await props.onSubmit({ zone_id: zoneId, scenario_id: scenarioId, time, days, enabled: props.initial?.enabled ?? true });
+    } finally {
+      setSaving(false);
+    }
+  }
+
   const inputClass =
-    "h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none";
+    "h-input rounded-control border border-border bg-bg-surface3 px-sm text-base text-text-primary focus:border-accent focus:outline-none";
 
   return (
-    <div className="flex flex-col gap-sm rounded-panel border border-border bg-bg-surface2 p-md">
-      {props.initial && <span className="text-xs font-medium text-accent">Editing {props.initial.time} · {props.initial.scenario_id}</span>}
+    <div className="flex flex-col gap-md rounded-[8px] border border-accent bg-bg-surface2 p-lg">
+      <div className="flex items-center justify-between">
+        <span className="text-md font-semibold text-text-primary">{props.initial ? "Edit Schedule" : "New Schedule"}</span>
+        <button onClick={props.onCancel} title="Cancel" className="text-lg leading-none text-text-muted hover:text-text-primary">
+          ×
+        </button>
+      </div>
+
       <div className="flex flex-wrap items-end gap-sm">
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-text-muted">Zone</span>
+        <label className="flex min-w-[160px] flex-col gap-1.5 text-base text-text-muted">
+          Zone
           <select value={zoneId ?? ""} onChange={(e) => setZoneId(Number(e.target.value))} className={inputClass}>
             {props.zones.map((z) => (
               <option key={z.zone_id} value={z.zone_id}>
@@ -267,8 +383,8 @@ function ScheduleEntryForm(props: {
             ))}
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-text-muted">Scenario</span>
+        <label className="flex min-w-[200px] flex-col gap-1.5 text-base text-text-muted">
+          Scenario
           <select value={scenarioId} onChange={(e) => setScenarioId(e.target.value)} className={inputClass}>
             {props.scenarios.map((s) => (
               <option key={s.scenario_id} value={s.scenario_id}>
@@ -277,40 +393,51 @@ function ScheduleEntryForm(props: {
             ))}
           </select>
         </label>
-        <label className="flex flex-col gap-1 text-xs">
-          <span className="text-text-muted">Time</span>
+        <label className="flex min-w-[110px] flex-col gap-1.5 text-base text-text-muted">
+          Time
           <input type="time" value={time} onChange={(e) => setTime(e.target.value)} className={inputClass} />
         </label>
-        <button
-          onClick={() => {
-            if (zoneId === null || !scenarioId) return;
-            void props.onSubmit({ zone_id: zoneId, scenario_id: scenarioId, time, days, enabled: props.initial?.enabled ?? true });
-          }}
-          disabled={zoneId === null || !scenarioId}
-          className="h-input rounded-control bg-primary px-md text-sm text-text-primary hover:bg-primary-hover disabled:opacity-50"
-        >
-          {props.initial ? "Save" : "+ Add"}
-        </button>
-        {props.onCancel && (
-          <button onClick={props.onCancel} className="h-input text-xs text-text-muted hover:text-text-secondary">
-            Cancel
-          </button>
-        )}
       </div>
-      <div className="flex flex-wrap items-center gap-xs">
-        <span className="text-xs text-text-muted">Days:</span>
-        {DAY_LABELS.map((label, i) => (
-          <button
-            key={label}
-            onClick={() => toggleDay(i)}
-            className={`rounded-control border px-xs py-0.5 text-xs ${
-              days.includes(i) ? "border-accent bg-accent text-bg-surface1" : "border-border text-text-muted hover:text-text-secondary"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-        {days.length === 0 && <span className="text-xs text-text-muted">(every day)</span>}
+
+      <div className="flex flex-col gap-2">
+        <span className="text-base text-text-muted">Repeats</span>
+        <div className="flex gap-1.5">
+          {DAY_LABELS.map((label, i) => (
+            <button
+              key={label}
+              onClick={() => toggleDay(i)}
+              className={`h-control w-[42px] rounded-control border text-base font-semibold ${
+                days.includes(i) ? "border-accent bg-accent text-text-primary" : "border-border text-text-muted hover:text-text-secondary"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+          {days.length === 0 && <span className="ml-xs self-center text-base text-text-muted">(every day)</span>}
+        </div>
+      </div>
+
+      {overlaps.length > 0 && (
+        <div className="flex items-start gap-sm rounded-panel border border-warning/35 bg-warning/10 px-md py-sm">
+          <span className="text-md leading-tight text-warning">⚠</span>
+          <span className="text-base leading-relaxed text-warning">
+            Overlaps <strong className="font-semibold">{overlaps.length === 1 ? "1 other schedule" : `${overlaps.length} other schedules`}</strong> in this zone:{" "}
+            {overlaps.map((o) => `${o.time} ${o.scenario_id}`).join(", ")}. Saving will double-book it.
+          </span>
+        </div>
+      )}
+
+      <div className="flex items-center gap-sm">
+        <button
+          onClick={() => void handleSave()}
+          disabled={zoneId === null || !scenarioId || saving}
+          className="h-control rounded-control bg-primary px-lg text-base font-medium text-text-primary hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saving ? "Saving…" : props.initial ? "Save changes" : "Add schedule"}
+        </button>
+        <button onClick={props.onCancel} className="h-control px-sm text-base text-text-muted hover:text-text-secondary">
+          Cancel
+        </button>
       </div>
     </div>
   );
