@@ -2,7 +2,16 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://127.0.0.1:8765 http://127.0.0.1:8765;" />
+    <!--
+      connect-src needs blob: for GLTFLoader (ScenePreview.tsx): three.js's
+      FileLoader reads a .glb's embedded textures via fetch() against an
+      in-memory blob: URL it creates from the binary buffer, not by
+      assigning an <img>.src -- so this is a fetch (connect-src), not an
+      image load (img-src), even though nothing ever leaves the page.
+      Without it every embedded texture silently fails and the model
+      renders untextured.
+    -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self' blob: ws://127.0.0.1:8765 http://127.0.0.1:8765;" />
     <title>Fountain Control</title>
   </head>
   <body>
