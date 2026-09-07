@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import * as THREE from "three";
 import { useConfigStore } from "../../store/configStore";
 
@@ -55,6 +56,46 @@ function CameraControls(): null {
   // Damping needs an explicit update() every frame to animate; without it
   // the camera would only move on pointer events.
   useFrame(() => controlsRef.current?.update());
+
+  return null;
+}
+
+/**
+ * A metal/plastic nozzle material (glTF's default PBR shading model,
+ * MeshStandardMaterial) gets almost none of its visible color from direct
+ * lighting -- a metallic or low-roughness surface is lit mainly by
+ * REFLECTING its surroundings, not by diffusing light back like the
+ * concrete basin does. With no environment to reflect (this scene had
+ * none at all before), those parts render essentially black regardless of
+ * how many directional lights are added -- adding more direct light doesn't
+ * fix a reflection problem. RoomEnvironment is three's own built-in stand-in
+ * for a real HDRI: a small generic room baked into a reflection (PMREM) map
+ * via the GPU, giving metallic/glossy surfaces something plausible to
+ * reflect without shipping or loading an actual environment image. Same
+ * "import straight from three/examples/jsm, not drei" reasoning as
+ * CameraControls above (drei's <Environment preset="..."/> does exactly
+ * this, at the cost of the same dependency this app avoids).
+ */
+function SceneEnvironment(): null {
+  const { gl, scene } = useThree();
+
+  useEffect(() => {
+    const pmremGenerator = new THREE.PMREMGenerator(gl);
+    const envTexture = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
+    scene.environment = envTexture;
+    // RoomEnvironment is deliberately bright (its whole job is giving a
+    // metallic surface something strong enough to reflect) -- at full
+    // strength its diffuse (IBL) contribution washes out the concrete and
+    // water too, not just the nozzles it was added for. environmentIntensity
+    // scales just the environment's contribution, independent of the
+    // directional/ambient lights actually lighting the rest of the scene.
+    scene.environmentIntensity = 0.35;
+    return () => {
+      scene.environment = null;
+      envTexture.dispose();
+      pmremGenerator.dispose();
+    };
+  }, [gl, scene]);
 
   return null;
 }
@@ -161,6 +202,7 @@ export function ScenePreview(): JSX.Element {
         <directionalLight position={[5, 8, 5]} intensity={1.2} />
         <directionalLight position={[-5, 4, -5]} intensity={0.4} />
         <gridHelper args={[20, 20, "#464647", "#2d2d30"]} />
+        <SceneEnvironment />
         <FountainModel onError={setModelError} />
         <ZoneLabelSync zoneEntries={zoneEntries} labelRefs={labelRefs} />
         <CameraControls />
