@@ -4,6 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import * as THREE from "three";
+import { errorMessage } from "../../lib/errors";
 import { useConfigStore } from "../../store/configStore";
 
 // Served from src/renderer/public/models/ -- electron-vite copies `public/`
@@ -148,7 +149,10 @@ function FountainModel({ onError }: { onError: (message: string) => void }): JSX
       },
       undefined,
       (err) => {
-        if (!cancelled) onError(err instanceof Error ? err.message : String(err));
+        // A GLTFLoader failure loading the bundled model file, not a
+        // daemon call -- describeError's "can't reach the daemon" message
+        // would be wrong here even if this happened to be a TypeError.
+        if (!cancelled) onError(errorMessage(err));
       },
     );
 

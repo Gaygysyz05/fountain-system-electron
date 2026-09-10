@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { describeError } from "../../lib/errors";
 import { restClient } from "../../lib/restClient";
 import type { AuditLogEntryDto } from "../../lib/protocol";
 import { useConfigStore } from "../../store/configStore";
@@ -30,7 +31,7 @@ export function AuditLogPanel(): JSX.Element {
       setEntries(result);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      setError(describeError(err));
     } finally {
       setLoading(false);
     }

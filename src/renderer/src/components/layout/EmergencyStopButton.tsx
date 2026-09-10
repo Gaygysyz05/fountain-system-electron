@@ -1,4 +1,5 @@
 import { useRef, useState } from "react";
+import { describeError } from "../../lib/errors";
 import { useConnectionStore } from "../../store/connectionStore";
 
 /**
@@ -51,7 +52,7 @@ export function EmergencyStopButton(): JSX.Element {
       (err: unknown) => {
         if (attemptRef.current !== attempt) return;
         setPhase("failed");
-        setErrorMessage(err instanceof Error ? err.message : String(err));
+        setErrorMessage(describeError(err));
       },
     );
   }

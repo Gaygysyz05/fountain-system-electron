@@ -4,6 +4,15 @@ import { spawn, type ChildProcess } from "child_process";
 import { writeFile, readFile } from "fs/promises";
 import { is } from "@electron-toolkit/utils";
 
+// Plain `catch (err) { ... }` -> readable-string fallback -- was
+// duplicated inline at every catch block below. A separate process from
+// the renderer (own module graph, own build target per tsconfig.node.json),
+// so this is its own tiny copy rather than importing the renderer's
+// lib/errors.ts.
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 // -- app settings (this shell's own preferences, not the daemon's hardware
 // config) ---------------------------------------------------------------
 //
@@ -35,7 +44,7 @@ async function writeAppSettings(settings: AppSettings): Promise<void> {
   try {
     await writeFile(settingsFilePath(), JSON.stringify(settings, null, 2), "utf-8");
   } catch (err) {
-    logLine(`[settings] failed to write settings.json (${err instanceof Error ? err.message : String(err)})`);
+    logLine(`[settings] failed to write settings.json (${errorMessage(err)})`);
   }
 }
 
@@ -217,7 +226,7 @@ ipcMain.handle("export-logs", async () => {
     await writeFile(result.filePath, logBuffer.join("\n") + "\n", "utf-8");
     return { ok: true, path: result.filePath };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    return { ok: false, error: errorMessage(err) };
   }
 });
 
@@ -390,7 +399,7 @@ async function stopDaemonGracefully(): Promise<void> {
       signal: AbortSignal.timeout(DAEMON_SHUTDOWN_TIMEOUT_MS),
     });
   } catch (err) {
-    logLine(`[daemon] graceful shutdown request failed (${err instanceof Error ? err.message : String(err)}) -- killing directly`);
+    logLine(`[daemon] graceful shutdown request failed (${errorMessage(err)}) -- killing directly`);
   }
   stopDaemon();
 }

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { errorMessage } from "../../lib/errors";
 
 /**
  * This app's own preferences -- as opposed to the daemon's hardware config
@@ -43,7 +44,10 @@ function AutoLaunchSetting(): JSX.Element {
       // reflect what's actually registered, not what was merely requested.
       setState(await window.electron.getAutoLaunch());
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // window.electron.setAutoLaunch is an IPC call to the main process,
+      // not the daemon -- describeError's "can't reach the daemon"
+      // special-casing would be wrong here, hence the plain fallback.
+      setError(errorMessage(err));
     } finally {
       setPending(false);
     }

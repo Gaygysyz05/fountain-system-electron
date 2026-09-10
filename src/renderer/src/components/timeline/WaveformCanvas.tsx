@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { describeError } from "../../lib/errors";
 import { restClient } from "../../lib/restClient";
 import { decodeAudioPeaks } from "../../lib/waveform";
 
@@ -61,7 +62,7 @@ export function WaveformCanvas({ musicFile, width, height }: WaveformCanvasProps
     })()
       .catch((err: unknown) => {
         if (controller.signal.aborted) return; // superseded, not a real failure
-        setError(err instanceof Error ? err.message : String(err));
+        setError(describeError(err));
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);

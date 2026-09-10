@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { describeError } from "../lib/errors";
 import { restClient } from "../lib/restClient";
 import type { ScheduleEntryDto, ScheduleEntryInput } from "../lib/protocol";
 
@@ -29,7 +30,7 @@ export const useScheduleStore = create<ScheduleStore>((set, get) => ({
       const entries = await restClient.getSchedule();
       set({ entries, loading: false, error: null });
     } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err) });
+      set({ loading: false, error: describeError(err) });
     }
   },
 

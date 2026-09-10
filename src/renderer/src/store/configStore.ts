@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { describeError } from "../lib/errors";
 import { restClient } from "../lib/restClient";
 import type { DriverDescriptorDto, ZoneConfigDto } from "../lib/protocol";
 import { daemonClient, useConnectionStore } from "./connectionStore";
@@ -60,7 +61,7 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
       const drivers = await restClient.getDrivers();
       set({ drivers });
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : String(err) });
+      set({ error: describeError(err) });
     }
   },
 
@@ -77,7 +78,7 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
         selectedZoneId: prev.selectedZoneId === null && zones.length > 0 ? zones[0].zone_id : prev.selectedZoneId,
       }));
     } catch (err) {
-      set({ loading: false, error: err instanceof Error ? err.message : String(err) });
+      set({ loading: false, error: describeError(err) });
     }
   },
 

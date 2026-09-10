@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTimelineStore } from "../../store/timelineStore";
+import { formatTime } from "../../lib/formatTime";
 import { buildToggleSpans, type ToggleSpan, type WireEvent } from "../playback/scenarioTimeline";
 import type { DeviceType } from "../../lib/protocol";
 
@@ -14,12 +15,6 @@ const PX_PER_SECOND = 40;
 
 function snap(t: number): number {
   return Math.round(t / SNAP) * SNAP;
-}
-
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${String(s).padStart(2, "0")}`;
 }
 
 /** Nearest span boundary on the OTHER side of `pivot` from every span

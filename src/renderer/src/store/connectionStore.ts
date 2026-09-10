@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { describeError } from "../lib/errors";
 import type { Ack, Command } from "../lib/protocol";
 import { DaemonClient, type ConnectionStatus } from "../lib/wsClient";
 
@@ -35,8 +36,7 @@ export const useConnectionStore = create<ConnectionStore>((set) => {
         set({ lastError: ack.ok ? null : (ack.error ?? "command failed") });
         return ack;
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        set({ lastError: message });
+        set({ lastError: describeError(err) });
         throw err;
       }
     },

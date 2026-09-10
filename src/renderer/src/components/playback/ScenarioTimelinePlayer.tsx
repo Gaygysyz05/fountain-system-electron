@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { restClient } from "../../lib/restClient";
 import { describeError } from "../../lib/errors";
+import { formatTime } from "../../lib/formatTime";
 import { resolveDeviceIds } from "../../lib/scenario";
 import { zonePositions } from "../../lib/livePosition";
 import { getContrastTextClass, groupDevicesByInstance } from "../timeline/deviceColumns";
@@ -445,10 +446,4 @@ function RowLabel({ label, title, zebraClass }: { label: string; title: string; 
       {label}
     </div>
   );
-}
-
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m}:${String(s).padStart(2, "0")}`;
 }

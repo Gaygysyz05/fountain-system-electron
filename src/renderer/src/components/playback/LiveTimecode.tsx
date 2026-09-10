@@ -1,12 +1,7 @@
 import { useEffect, useRef } from "react";
+import { formatTime } from "../../lib/formatTime";
 import { zonePositions } from "../../lib/livePosition";
 import { useConnectionStore } from "../../store/connectionStore";
-
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
-}
 
 /**
  * Reads `zonePositions` (see lib/livePosition.ts) directly inside a
