@@ -79,6 +79,15 @@ export function DeviceTable({
   const colorTargetRef = useRef<"cell" | "selection">("cell");
   const colorCellRef = useRef<Cell | null>(null);
   const firstRealRowRef = useRef<HTMLTableRowElement>(null);
+  // Guards the numeric edit input's onBlur against firing a second time --
+  // conditionally unmounting a focused <input> (setEditingCell(null),
+  // whichever path calls it) makes the browser fire a native blur as the
+  // element is removed, on TOP of whatever explicitly closed the editor
+  // (Enter, Escape, a shape-change reset). Without this, Enter committed
+  // twice (a single edit pushed two undo-history entries, so one Ctrl+Z
+  // only partially undid it) and Escape's "discard" never actually
+  // discarded -- the unmount-driven blur committed the value anyway.
+  const editFinalizedRef = useRef(false);
 
   // Row virtualization -- a long scenario (music-generated ones especially:
   // several minutes at a 0.5s step, sometimes finer) used to render every
@@ -180,6 +189,7 @@ export function DeviceTable({
   // shape rather than letting a render read `columns[outOfRangeIndex]` and
   // crash.
   useEffect(() => {
+    editFinalizedRef.current = true;
     setSelStart(null);
     setSelEnd(null);
     setEditingCell(null);
@@ -258,6 +268,7 @@ export function DeviceTable({
     if (column.kind === "toggle") {
       commit(column.deviceId, row, { [column.field]: !isOn(getEffective(column.deviceId, row), column) });
     } else if (column.kind === "number") {
+      editFinalizedRef.current = false;
       setEditingCell({ row, col });
     } else {
       colorTargetRef.current = "cell";
@@ -294,12 +305,19 @@ export function DeviceTable({
   }
 
   function commitNumberEdit(row: number, col: number, text: string): void {
+    if (editFinalizedRef.current) return; // already handled -- see editFinalizedRef's comment
+    editFinalizedRef.current = true;
     const column = columns[col];
     const n = parseFloat(text);
     setEditingCell(null);
     if (Number.isNaN(n)) return;
     const clamped = Math.max(column.min ?? -Infinity, Math.min(column.max ?? Infinity, n));
     commit(column.deviceId, row, { [column.field]: clamped });
+  }
+
+  function cancelNumberEdit(): void {
+    editFinalizedRef.current = true;
+    setEditingCell(null);
   }
 
   function forEachSelected(kind: DeviceColumn["kind"], fn: (row: number, col: DeviceColumn) => void): void {
@@ -586,7 +604,7 @@ export function DeviceTable({
                       onKeyDown={(e) => {
                         e.stopPropagation();
                         if (e.key === "Enter") commitNumberEdit(row, col, (e.target as HTMLInputElement).value);
-                        if (e.key === "Escape") setEditingCell(null);
+                        if (e.key === "Escape") cancelNumberEdit();
                       }}
                       className="w-16 border-0 bg-transparent text-center text-xs text-text-primary outline-none"
                     />
