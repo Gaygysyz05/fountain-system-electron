@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { restClient } from "../lib/restClient";
+import { afterMutation } from "../lib/storeHelpers";
 import type { ScenarioDto } from "../lib/protocol";
 
 // Kept separate from configStore (driver instances/devices) on purpose --
@@ -23,8 +24,8 @@ export const useScenariosStore = create<ScenariosStore>((set, get) => ({
       // the connection status dot already tells the operator what's wrong.
     }
   },
-  deleteScenario: async (scenarioId) => {
-    await restClient.deleteScenario(scenarioId);
-    await get().loadScenarios();
-  },
+  deleteScenario: afterMutation(
+    (scenarioId: string) => restClient.deleteScenario(scenarioId),
+    () => get().loadScenarios(),
+  ),
 }));

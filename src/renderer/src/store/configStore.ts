@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { describeError } from "../lib/errors";
 import { restClient } from "../lib/restClient";
+import { afterMutation } from "../lib/storeHelpers";
 import type { DriverDescriptorDto, ZoneConfigDto } from "../lib/protocol";
 import { daemonClient, useConnectionStore } from "./connectionStore";
 import type { ConnectionStatus } from "../lib/wsClient";
@@ -92,10 +93,11 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
     return { connected: instances.filter((i) => i.connected).length, total: instances.length };
   },
 
-  renameZone: async (zoneId, name) => {
-    await useConnectionStore.getState().sendCommand({ command: "RENAME_ZONE", zone_id: zoneId, name });
-    await get().loadZones();
-  },
+  renameZone: afterMutation(
+    (zoneId: number, name: string | null) =>
+      useConnectionStore.getState().sendCommand({ command: "RENAME_ZONE", zone_id: zoneId, name }),
+    () => get().loadZones(),
+  ),
 
   deleteZone: async (zoneId) => {
     await useConnectionStore.getState().sendCommand({ command: "DELETE_ZONE", zone_id: zoneId });
@@ -103,47 +105,47 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
     await get().loadZones();
   },
 
-  addDriverInstance: async (zoneId, instanceId, driverType, config) => {
-    await useConnectionStore.getState().sendCommand({
-      command: "ADD_DRIVER_INSTANCE",
-      zone_id: zoneId,
-      instance_id: instanceId,
-      driver_type: driverType,
-      config,
-    });
-    await get().loadZones();
-  },
+  addDriverInstance: afterMutation(
+    (zoneId: number, instanceId: string, driverType: string, config: Record<string, unknown>) =>
+      useConnectionStore.getState().sendCommand({
+        command: "ADD_DRIVER_INSTANCE",
+        zone_id: zoneId,
+        instance_id: instanceId,
+        driver_type: driverType,
+        config,
+      }),
+    () => get().loadZones(),
+  ),
 
-  removeDriverInstance: async (zoneId, instanceId) => {
-    await useConnectionStore.getState().sendCommand({
-      command: "REMOVE_DRIVER_INSTANCE",
-      zone_id: zoneId,
-      instance_id: instanceId,
-    });
-    await get().loadZones();
-  },
+  removeDriverInstance: afterMutation(
+    (zoneId: number, instanceId: string) =>
+      useConnectionStore.getState().sendCommand({
+        command: "REMOVE_DRIVER_INSTANCE",
+        zone_id: zoneId,
+        instance_id: instanceId,
+      }),
+    () => get().loadZones(),
+  ),
 
-  addDevice: async (zoneId, deviceId, instanceId, channel, nozzleGroup, nozzleInverter) => {
-    await useConnectionStore.getState().sendCommand({
-      command: "ADD_DEVICE",
-      zone_id: zoneId,
-      device_id: deviceId,
-      instance_id: instanceId,
-      channel,
-      nozzle_group: nozzleGroup ?? null,
-      nozzle_inverter: nozzleInverter ?? null,
-    });
-    await get().loadZones();
-  },
+  addDevice: afterMutation(
+    (zoneId: number, deviceId: string, instanceId: string, channel: string, nozzleGroup?: string, nozzleInverter?: 1 | 2) =>
+      useConnectionStore.getState().sendCommand({
+        command: "ADD_DEVICE",
+        zone_id: zoneId,
+        device_id: deviceId,
+        instance_id: instanceId,
+        channel,
+        nozzle_group: nozzleGroup ?? null,
+        nozzle_inverter: nozzleInverter ?? null,
+      }),
+    () => get().loadZones(),
+  ),
 
-  removeDevice: async (zoneId, deviceId) => {
-    await useConnectionStore.getState().sendCommand({
-      command: "REMOVE_DEVICE",
-      zone_id: zoneId,
-      device_id: deviceId,
-    });
-    await get().loadZones();
-  },
+  removeDevice: afterMutation(
+    (zoneId: number, deviceId: string) =>
+      useConnectionStore.getState().sendCommand({ command: "REMOVE_DEVICE", zone_id: zoneId, device_id: deviceId }),
+    () => get().loadZones(),
+  ),
 }));
 
 // Unlike zonesStore, this one has no event stream keeping it live -- it only

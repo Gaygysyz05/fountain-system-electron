@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { describeError } from "../lib/errors";
 import { restClient } from "../lib/restClient";
+import { afterMutation } from "../lib/storeHelpers";
 import type { ScheduleEntryDto, ScheduleEntryInput } from "../lib/protocol";
 
 // Same reasoning as scenariosStore/configStore's split: a schedule entry
@@ -34,18 +35,18 @@ export const useScheduleStore = create<ScheduleStore>((set, get) => ({
     }
   },
 
-  createEntry: async (input) => {
-    await restClient.createScheduleEntry(input);
-    await get().loadSchedule();
-  },
+  createEntry: afterMutation(
+    (input: ScheduleEntryInput) => restClient.createScheduleEntry(input),
+    () => get().loadSchedule(),
+  ),
 
-  updateEntry: async (entryId, input) => {
-    await restClient.updateScheduleEntry(entryId, input);
-    await get().loadSchedule();
-  },
+  updateEntry: afterMutation(
+    (entryId: string, input: Partial<ScheduleEntryInput>) => restClient.updateScheduleEntry(entryId, input),
+    () => get().loadSchedule(),
+  ),
 
-  deleteEntry: async (entryId) => {
-    await restClient.deleteScheduleEntry(entryId);
-    await get().loadSchedule();
-  },
+  deleteEntry: afterMutation(
+    (entryId: string) => restClient.deleteScheduleEntry(entryId),
+    () => get().loadSchedule(),
+  ),
 }));

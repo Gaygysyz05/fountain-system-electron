@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useConfigStore } from "../../store/configStore";
 import { useConnectionStore } from "../../store/connectionStore";
 import { deviceStateKey, useZonesStore } from "../../store/zonesStore";
+import { nextFreeId, nextFreeIds } from "../../lib/nextFreeId";
 import { ChannelGrid } from "./ChannelGrid";
 import { SchemaForm } from "./SchemaForm";
 import type { DeviceType, ZoneConfigDto } from "../../lib/protocol";
@@ -490,10 +491,7 @@ function InstanceCard(props: {
     const used = new Set(props.devices.map((d) => d.channel));
     const start = isLight ? 0 : 1;
     const end = isLight ? NODE8_MAX_UNIVERSE : start + 999;
-    for (let n = start; n <= end; n++) {
-      if (!used.has(String(n))) return String(n);
-    }
-    return String(start);
+    return nextFreeId(used, start, end);
   }
 
   function openAddDevice(): void {
@@ -977,18 +975,13 @@ function AddNozzleForm(props: {
   // value doesn't get silently overwritten).
   const [freeSlave1, freeSlave2] = useMemo(() => {
     const used = new Set(props.devices.map((d) => d.channel));
-    const free: string[] = [];
-    for (let n = 1; free.length < 2; n++) {
-      const s = String(n);
-      if (!used.has(s)) free.push(s);
-    }
-    return free;
+    return nextFreeIds(used, 1, 2);
   }, [props.devices]);
 
   const [name, setName] = useState("");
   const [nozzleId, setNozzleId] = useState(() => {
     const usedGroups = new Set(props.devices.map((d) => d.nozzle_group).filter((g): g is string => g != null));
-    for (let n = 1; ; n++) if (!usedGroups.has(String(n))) return String(n);
+    return nextFreeId(usedGroups, 1);
   });
   const [slave1, setSlave1] = useState(freeSlave1);
   const [slave2, setSlave2] = useState(freeSlave2);
