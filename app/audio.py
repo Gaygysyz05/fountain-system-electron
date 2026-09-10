@@ -38,6 +38,16 @@ def _ensure_mixer() -> None:
 class AudioPlayer:
     def __init__(self) -> None:
         self._loaded_file: str | None = None
+        # SDL_mixer's own calls aren't documented as safe to call
+        # concurrently from two threads -- every method here dispatches to
+        # the SAME shared executor thread pool (run_in_executor(None, ...)),
+        # so without serializing them, e.g. a loop-triggered play() and an
+        # operator-triggered stop() issued around the same moment could
+        # both be mid-call on pygame.mixer.music at once. The lock doesn't
+        # decide which one "wins" (that's ZoneScenarioPlayer's job -- see
+        # its loop-wrap restart re-checking is_playing after this awaits),
+        # it just guarantees they never actually overlap at the SDL level.
+        self._lock = asyncio.Lock()
 
     async def load(self, file_path: str) -> bool:
         def _load() -> bool:
@@ -49,23 +59,40 @@ class AudioPlayer:
                 logger.warning("failed to load audio file %s: %s", file_path, exc)
                 return False
 
-        ok = await asyncio.get_event_loop().run_in_executor(None, _load)
+        async with self._lock:
+            ok = await asyncio.get_event_loop().run_in_executor(None, _load)
         self._loaded_file = file_path if ok else None
         return ok
 
     async def play(self) -> None:
         if not self._loaded_file:
             return
-        await asyncio.get_event_loop().run_in_executor(None, pygame.mixer.music.play)
+
+        def _play() -> None:
+            try:
+                pygame.mixer.music.play()
+            except pygame.error as exc:
+                # Matches load()/seek()'s stance: a device hiccup here must
+                # not take the whole scenario tick loop down with it (see
+                # scenario_player.py's loop-wrap restart, the one caller
+                # that runs on every lap of a looping show, not just once
+                # at playback start).
+                logger.warning("failed to (re)start music playback: %s", exc)
+
+        async with self._lock:
+            await asyncio.get_event_loop().run_in_executor(None, _play)
 
     async def pause(self) -> None:
-        await asyncio.get_event_loop().run_in_executor(None, pygame.mixer.music.pause)
+        async with self._lock:
+            await asyncio.get_event_loop().run_in_executor(None, pygame.mixer.music.pause)
 
     async def resume(self) -> None:
-        await asyncio.get_event_loop().run_in_executor(None, pygame.mixer.music.unpause)
+        async with self._lock:
+            await asyncio.get_event_loop().run_in_executor(None, pygame.mixer.music.unpause)
 
     async def stop(self) -> None:
-        await asyncio.get_event_loop().run_in_executor(None, pygame.mixer.music.stop)
+        async with self._lock:
+            await asyncio.get_event_loop().run_in_executor(None, pygame.mixer.music.stop)
 
     async def seek(self, position: float) -> None:
         if not self._loaded_file:
@@ -80,7 +107,8 @@ class AudioPlayer:
                 # rather than let a scrub attempt take the daemon down.
                 logger.warning("seek to %.2fs not supported for this file: %s", position, exc)
 
-        await asyncio.get_event_loop().run_in_executor(None, _seek)
+        async with self._lock:
+            await asyncio.get_event_loop().run_in_executor(None, _seek)
 
     def is_playing(self) -> bool:
         return _mixer_ready and pygame.mixer.music.get_busy()

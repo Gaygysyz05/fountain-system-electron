@@ -91,6 +91,28 @@ async def test_genuine_transport_failure_marks_disconnected() -> None:
         await controller.disconnect()
 
 
+async def test_reconnect_closes_the_previous_client_instead_of_leaking_it() -> None:
+    """connect() used to unconditionally create a new AsyncModbusTcpClient
+    and overwrite self._client with no regard for whatever the old one was
+    doing -- on the exact flaky-link scenario _reconnect_watchdog exists to
+    ride out, that leaked one more socket/transport per retry cycle. The
+    fix must close the outgoing client before replacing it."""
+    async with FakeModbusServer() as server:
+        bus = EventBus()
+        controller = await make_controller(server, bus, total_channels=2)
+
+        first_client = controller._client
+        assert first_client is not None
+        assert first_client.connected is True
+
+        assert await controller.connect()  # simulates the watchdog's repeat connect() call
+
+        assert controller._client is not first_client  # a fresh client was made, as before
+        assert first_client.connected is False  # ...but the old one was actually closed, not abandoned
+
+        await controller.disconnect()
+
+
 def _drain(queue: asyncio.Queue) -> list:
     items = []
     while not queue.empty():

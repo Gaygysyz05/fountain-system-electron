@@ -102,11 +102,17 @@ def list_drivers(category: DeviceCategory | None = None) -> list[DriverDescripto
     return sorted(drivers, key=lambda d: d.driver_type)
 
 
-def create_instance(zone_id: int, instance_id: str, driver_type: str, raw_config: dict, bus: EventBus) -> DriverInstance:
+def create_instance(zone_id: int, instance_id: str, driver_type: str, raw_config: dict, bus: EventBus) -> tuple[DriverInstance, BaseModel]:
     """Validates raw_config against the driver's own schema before
     construction -- a malformed device config fails here with a clear
     Pydantic error instead of surfacing as a confusing runtime AttributeError
-    three calls deep into some controller."""
+    three calls deep into some controller. Returns the validated config
+    alongside the instance: a caller that needs a schema field (e.g.
+    total_channels) must read it from here, not from raw_config -- the raw
+    dict doesn't reflect the schema's own defaults/coercions (an omitted
+    total_channels defaults to 32 on the validated model but is simply
+    absent from raw_config, and a string "32" from a form post coerces to
+    int only on the validated model)."""
     descriptor = get_driver(driver_type)
     config = descriptor.config_model.model_validate(raw_config)
-    return descriptor.factory(zone_id, instance_id, config, bus)
+    return descriptor.factory(zone_id, instance_id, config, bus), config

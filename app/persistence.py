@@ -184,7 +184,7 @@ async def load_installation(get_zone: Callable[[int], ZoneRuntime]) -> None:
     logger.info("loaded installation config: %d zone(s)", len(payload.get("zones", [])))
 
 
-def list_scenarios() -> list[dict]:
+def _list_scenarios_sync() -> list[dict]:
     if not SCENARIOS_DIR.exists():
         return []
     scenarios = []
@@ -200,6 +200,15 @@ def list_scenarios() -> list[dict]:
             "duration": data.get("duration", 0.0),
         })
     return scenarios
+
+
+async def list_scenarios() -> list[dict]:
+    # Same rationale as save_installation/save_scenario: this globs and
+    # reads every scenario file in the folder on the same event loop that
+    # drives the 50ms hardware tick -- a plain synchronous version blocks
+    # relay/VFD ticks for however long that directory scan+read takes,
+    # which only gets worse as an install accumulates more shows.
+    return await asyncio.get_running_loop().run_in_executor(None, _list_scenarios_sync)
 
 
 def _backup_and_write_scenario(path: Path, scenario_id: str, content: str) -> None:
@@ -235,22 +244,30 @@ async def save_scenario(scenario_id: str, data: ScenarioFileDto) -> None:
     )
 
 
-def delete_scenario(scenario_id: str) -> None:
+def _delete_scenario_sync(scenario_id: str) -> None:
     path = _scenario_path(scenario_id)
     if not path.exists():
         raise FileNotFoundError(f"scenario '{scenario_id}' not found ({path})")
     path.unlink()
 
 
-def read_scenario_raw(scenario_id: str) -> dict:
-    """Full file content for the timeline UI to load back into its editor --
-    the raw JSON as saved, NOT the runtime `Project` from load_scenario()
-    (that one resolves music_file to an absolute path and drops `name`
-    entirely, neither of which the editor should see or re-save)."""
+async def delete_scenario(scenario_id: str) -> None:
+    await asyncio.get_running_loop().run_in_executor(None, _delete_scenario_sync, scenario_id)
+
+
+def _read_scenario_raw_sync(scenario_id: str) -> dict:
     path = _scenario_path(scenario_id)
     if not path.exists():
         raise FileNotFoundError(f"scenario '{scenario_id}' not found ({path})")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+async def read_scenario_raw(scenario_id: str) -> dict:
+    """Full file content for the timeline UI to load back into its editor --
+    the raw JSON as saved, NOT the runtime `Project` from load_scenario()
+    (that one resolves music_file to an absolute path and drops `name`
+    entirely, neither of which the editor should see or re-save)."""
+    return await asyncio.get_running_loop().run_in_executor(None, _read_scenario_raw_sync, scenario_id)
 
 
 def resolve_music_path(music_file: str) -> Path:
@@ -280,7 +297,7 @@ def resolve_music_path(music_file: str) -> Path:
     return resolved
 
 
-def load_scenario(scenario_id: str) -> Project:
+def _load_scenario_sync(scenario_id: str) -> Project:
     path = _scenario_path(scenario_id)
     if not path.exists():
         raise FileNotFoundError(f"scenario '{scenario_id}' not found ({path})")
@@ -293,6 +310,15 @@ def load_scenario(scenario_id: str) -> Project:
         music_file = str(resolve_music_path(music_file))
 
     return Project(duration=data["duration"], events=events, music_file=music_file)
+
+
+async def load_scenario(scenario_id: str) -> Project:
+    # PLAY_SCENARIO (main.py's WS dispatch) and the 20s schedule check both
+    # call this directly on the daemon's one event loop -- the same loop
+    # driving the 50ms relay/VFD tick. A plain synchronous read stalls that
+    # tick for the read's duration right as a show is starting, which is
+    # exactly the moment hardware output should be most responsive.
+    return await asyncio.get_running_loop().run_in_executor(None, _load_scenario_sync, scenario_id)
 
 
 # -- audit log ---------------------------------------------------------------
@@ -334,9 +360,7 @@ async def append_audit_entry(command: str, zone_id: int | None, ok: bool, error:
         logger.error("failed to write %s: %s", AUDIT_LOG_FILE, exc)
 
 
-def read_audit_log(limit: int = 200) -> list[dict]:
-    """Most recent entries first -- what an operator reviewing an incident
-    wants to see without scrolling."""
+def _read_audit_log_sync(limit: int) -> list[dict]:
     if not AUDIT_LOG_FILE.exists():
         return []
     entries = []
@@ -347,6 +371,12 @@ def read_audit_log(limit: int = 200) -> list[dict]:
             continue
     entries.reverse()
     return entries
+
+
+async def read_audit_log(limit: int = 200) -> list[dict]:
+    """Most recent entries first -- what an operator reviewing an incident
+    wants to see without scrolling."""
+    return await asyncio.get_running_loop().run_in_executor(None, _read_audit_log_sync, limit)
 
 
 # -- scheduled playback --------------------------------------------------------
@@ -390,7 +420,7 @@ class ScheduleEntryUpdateDto(BaseModel):
     enabled: Optional[bool] = None
 
 
-def load_schedule() -> list[ScheduleEntryDto]:
+def _load_schedule_sync() -> list[ScheduleEntryDto]:
     if not SCHEDULE_FILE.exists():
         return []
     try:
@@ -399,6 +429,12 @@ def load_schedule() -> list[ScheduleEntryDto]:
         logger.error("failed to read %s: %s -- starting with no schedule", SCHEDULE_FILE, exc)
         return []
     return [ScheduleEntryDto.model_validate(e) for e in payload]
+
+
+async def load_schedule() -> list[ScheduleEntryDto]:
+    # Read on every GET /schedule and every _check_schedule pass (every
+    # 20s) -- same event-loop-blocking concern as the others above.
+    return await asyncio.get_running_loop().run_in_executor(None, _load_schedule_sync)
 
 
 async def save_schedule(entries: list[ScheduleEntryDto]) -> None:

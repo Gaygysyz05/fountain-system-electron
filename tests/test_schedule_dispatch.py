@@ -102,7 +102,7 @@ async def test_due_entry_plays_its_scenario(monkeypatch) -> None:
     assert zone.player.is_playing is True
     assert any(p.get("active") is True for _, p in motor.applied)
 
-    saved = persistence.load_schedule()
+    saved = await persistence.load_schedule()
     assert saved[0].last_fired_date == "2026-09-01"
 
     await zone.player.stop()
@@ -164,8 +164,8 @@ async def test_entry_for_a_missing_scenario_is_marked_fired_and_logged(monkeypat
 
     await app_main._check_schedule()
 
-    saved = persistence.load_schedule()
+    saved = await persistence.load_schedule()
     assert saved[0].last_fired_date == "2026-09-01"
-    audit = persistence.read_audit_log()
+    audit = await persistence.read_audit_log()
     assert audit[0]["command"] == "SCHEDULED_PLAY"
     assert audit[0]["ok"] is False

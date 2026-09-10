@@ -220,7 +220,26 @@ class ZoneScenarioPlayer:
                         # the scenario's if the track and project.duration
                         # aren't frame-identical.
                         if self._loaded_music_file:
-                            await self.audio.play()
+                            try:
+                                await self.audio.play()
+                                # stop() sets is_playing=False synchronously,
+                                # before it awaits anything (see stop(),
+                                # below) -- so if a Stop command landed while
+                                # this await was suspended waiting on
+                                # AudioPlayer's executor job, that flip has
+                                # already happened by the time we resume
+                                # here. AudioPlayer's own lock (audio.py)
+                                # only guarantees this play() and stop()'s
+                                # audio.stop() never run AT THE SAME instant
+                                # at the SDL level; it doesn't decide which
+                                # one should have won. This re-check is what
+                                # makes "Stop" actually stick even when it
+                                # lands mid-restart, instead of the track
+                                # audibly starting back up a moment later.
+                                if not self.is_playing:
+                                    await self.audio.stop()
+                            except Exception:  # noqa: BLE001 -- see the tick-processing try/except below: this task is fire-and-forget and nothing supervises it, so ANY exception here (not just the pygame.error AudioPlayer.play() already catches) must not be allowed to kill the loop -- a dead loop stops the watchdog too, leaving an active device with nothing to force-stop it.
+                                logger.exception("zone %s: failed to restart music on loop wrap, continuing without it", self.zone_id)
                     else:
                         self.current_position = self.project.duration
                         self.is_playing = False

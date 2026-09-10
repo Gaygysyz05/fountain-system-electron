@@ -72,6 +72,14 @@ class AsyncValveController:
     # -- lifecycle ---------------------------------------------------------
 
     async def connect(self) -> bool:
+        if self._client is not None:
+            # _reconnect_watchdog calls connect() again on every retry while
+            # not _connected -- without closing the PREVIOUS client first,
+            # each failed/dropped attempt on a flaky link (exactly what the
+            # watchdog exists to ride out) leaks that old socket/transport
+            # instead of replacing it, one more descriptor gone every retry
+            # on a long-running unattended install.
+            self._client.close()
         try:
             self._client = AsyncModbusTcpClient(host=self.host, port=self.port, timeout=self.write_timeout)
             await self._client.connect()

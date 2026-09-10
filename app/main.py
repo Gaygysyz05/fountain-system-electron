@@ -59,7 +59,7 @@ async def _check_schedule() -> None:
     minute (several checks wide at this interval) -- see
     ScheduleEntryDto's docstring for why a missed time is skipped, not
     caught up on, if the daemon was down."""
-    entries = persistence.load_schedule()
+    entries = await persistence.load_schedule()
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
     current_time = now.strftime("%H:%M")
@@ -76,7 +76,7 @@ async def _check_schedule() -> None:
         changed = True
         try:
             zone = get_zone(entry.zone_id)
-            project = persistence.load_scenario(entry.scenario_id)
+            project = await persistence.load_scenario(entry.scenario_id)
             zone.player.load_project(project, entry.scenario_id)
             await zone.player.play()
             logger.info("schedule: zone %s playing '%s' (scheduled %s)", entry.zone_id, entry.scenario_id, entry.time)
@@ -242,7 +242,7 @@ async def get_drivers() -> list[dict]:
 @app.get("/scenarios")
 async def get_scenarios() -> list[dict]:
     """Read-only listing of scenario files on disk (data/scenarios/*.json)."""
-    return persistence.list_scenarios()
+    return await persistence.list_scenarios()
 
 
 @app.get("/scenarios/{scenario_id}")
@@ -250,7 +250,7 @@ async def get_scenario(scenario_id: str) -> dict:
     """Full content for the timeline UI to edit -- GET reads exactly what
     POST (below) writes."""
     try:
-        return persistence.read_scenario_raw(scenario_id)
+        return await persistence.read_scenario_raw(scenario_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -297,7 +297,7 @@ async def delete_scenario(scenario_id: str) -> dict:
     it doesn't keep re-reading the file, so deleting it mid-playback can't
     interrupt a running show."""
     try:
-        persistence.delete_scenario(scenario_id)
+        await persistence.delete_scenario(scenario_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileNotFoundError as exc:
@@ -307,12 +307,12 @@ async def delete_scenario(scenario_id: str) -> dict:
 
 @app.get("/schedule")
 async def get_schedule() -> list[dict]:
-    return [e.model_dump() for e in persistence.load_schedule()]
+    return [e.model_dump() for e in await persistence.load_schedule()]
 
 
 @app.post("/schedule")
 async def create_schedule_entry(payload: persistence.ScheduleEntryCreateDto) -> dict:
-    entries = persistence.load_schedule()
+    entries = await persistence.load_schedule()
     entry = persistence.ScheduleEntryDto(id=str(uuid4()), **payload.model_dump())
     entries.append(entry)
     await persistence.save_schedule(entries)
@@ -321,7 +321,7 @@ async def create_schedule_entry(payload: persistence.ScheduleEntryCreateDto) -> 
 
 @app.put("/schedule/{entry_id}")
 async def update_schedule_entry(entry_id: str, payload: persistence.ScheduleEntryUpdateDto) -> dict:
-    entries = persistence.load_schedule()
+    entries = await persistence.load_schedule()
     for i, entry in enumerate(entries):
         if entry.id == entry_id:
             # exclude_unset -- a field the client didn't send must keep its
@@ -337,7 +337,7 @@ async def update_schedule_entry(entry_id: str, payload: persistence.ScheduleEntr
 
 @app.delete("/schedule/{entry_id}")
 async def delete_schedule_entry(entry_id: str) -> dict:
-    entries = persistence.load_schedule()
+    entries = await persistence.load_schedule()
     remaining = [e for e in entries if e.id != entry_id]
     if len(remaining) == len(entries):
         raise HTTPException(status_code=404, detail=f"schedule entry '{entry_id}' not found")
@@ -347,7 +347,7 @@ async def delete_schedule_entry(entry_id: str) -> dict:
 
 @app.get("/audit")
 async def get_audit_log(limit: int = 200) -> list[dict]:
-    return persistence.read_audit_log(limit=limit)
+    return await persistence.read_audit_log(limit=limit)
 
 
 @app.websocket(config.WS_PATH)
@@ -490,7 +490,7 @@ async def _dispatch(cmd) -> None:  # noqa: ANN001 - discriminated union, see app
 
         case "PLAY_SCENARIO":
             zone = get_zone(cmd.zone_id)
-            project = persistence.load_scenario(cmd.scenario_id)  # raises FileNotFoundError -> Ack(ok=False)
+            project = await persistence.load_scenario(cmd.scenario_id)  # raises FileNotFoundError -> Ack(ok=False)
             zone.player.load_project(project, cmd.scenario_id)
             await zone.player.play()
 
@@ -523,16 +523,26 @@ async def _dispatch(cmd) -> None:  # noqa: ANN001 - discriminated union, see app
             await asyncio.gather(*(z.emergency_stop() for z in targets))
 
         case "RECONNECT_INSTANCE":
-            zone = get_zone(cmd.zone_id)
-            await zone.reconnect_instance(cmd.instance_id)
+            # get_zone() would silently CREATE a fresh, empty zone for a
+            # typo'd/stale zone_id here -- unlike CONNECT_ZONE et al. above,
+            # there is no legitimate "first time we've heard of this zone"
+            # case for a reconnect, so that zombie zone would just sit in
+            # `zones` forever, showing up in GET /zones with nothing in it.
+            # A missing zone is a real error for this command, not a no-op
+            # (that would swallow the mistake) and not something to create.
+            if cmd.zone_id not in zones:
+                raise RuntimeError(f"unknown zone {cmd.zone_id}")
+            await zones[cmd.zone_id].reconnect_instance(cmd.instance_id)
 
         case "SET_DEVICE_STATE":
-            zone = get_zone(cmd.zone_id)
-            zone.set_device_state(cmd.device_id, cmd.parameters)
+            if cmd.zone_id not in zones:  # see RECONNECT_INSTANCE above
+                raise RuntimeError(f"unknown zone {cmd.zone_id}")
+            zones[cmd.zone_id].set_device_state(cmd.device_id, cmd.parameters)
 
         case "RESET_MOTOR_FAULT":
-            zone = get_zone(cmd.zone_id)
-            if not await zone.reset_motor_fault(cmd.device_id):
+            if cmd.zone_id not in zones:  # see RECONNECT_INSTANCE above
+                raise RuntimeError(f"unknown zone {cmd.zone_id}")
+            if not await zones[cmd.zone_id].reset_motor_fault(cmd.device_id):
                 raise RuntimeError(f"fault reset failed for '{cmd.device_id}'")
 
 

@@ -105,6 +105,40 @@ async def test_loop_restarts_the_music_track_on_each_wrap() -> None:
     assert fake_audio.play_count >= 3  # initial play + at least 2 wraps
 
 
+async def test_stop_during_loop_wrap_restart_leaves_audio_stopped() -> None:
+    """A Stop landing while _loop() is mid-`await self.audio.play()` for a
+    loop-wrap restart used to have no effect on the audio -- stop()'s own
+    audio.stop() could complete first (or the two could race at the SDL
+    level), then the in-flight play() would finish and leave the track
+    audibly playing again right after the operator pressed Stop. _loop()
+    must notice is_playing went False while it was suspended and re-stop."""
+    player, _ = _make_player()
+    fake_audio = FakeAudioPlayer()
+
+    # Simulates the exact race: by the time AudioPlayer.play()'s (awaited)
+    # executor job would resolve, a concurrent stop() has already flipped
+    # is_playing (which stop() does synchronously, before its own first
+    # await -- see scenario_player.py's stop()).
+    real_play = fake_audio.play
+
+    async def play_and_race_a_concurrent_stop() -> None:
+        player.is_playing = False
+        await real_play()
+
+    fake_audio.play = play_and_race_a_concurrent_stop  # type: ignore[method-assign]
+    player.audio = fake_audio  # type: ignore[assignment]
+
+    project = Project(duration=0.05, events=[], music_file="show.mp3")
+    player.load_project(project, "s1")
+    player.is_looping = True
+
+    await player.play()
+    await asyncio.sleep(0.15)  # let at least one loop-wrap fire
+
+    assert fake_audio.play_count >= 1  # the racing restart really was attempted
+    assert fake_audio.stopped is True  # ...but the race was caught and corrected
+
+
 async def test_non_looping_playback_stops_at_duration() -> None:
     player, _ = _make_player()
     project = Project(duration=0.05, events=[])

@@ -64,7 +64,7 @@ class ZoneRuntime:
             return self.driver_instances[instance_id].is_connected()
 
         category = get_driver(driver_type).category
-        instance = create_instance(self.zone_id, instance_id, driver_type, config, self.bus)
+        instance, validated_config = create_instance(self.zone_id, instance_id, driver_type, config, self.bus)
 
         # Registered regardless of whether this first connect attempt
         # succeeds: hardware being unreachable at configure-time (not yet
@@ -89,7 +89,14 @@ class ZoneRuntime:
         # that actually declare total_channels (currently just
         # modbus_relay_valve) -- motors and Art-Net lights have no such
         # fixed-bank concept and still get added one at a time.
-        total_channels = config.get("total_channels")
+        #
+        # Read from validated_config, not the raw config dict: total_channels
+        # has a schema default (32) that an operator who omits the field
+        # entirely never sees reflected in raw_config, and a value submitted
+        # as e.g. the string "32" only becomes a real int after validation --
+        # either case used to make this isinstance(..., int) check silently
+        # false and skip auto-registration altogether.
+        total_channels = getattr(validated_config, "total_channels", None)
         if isinstance(total_channels, int) and total_channels > 0:
             for channel in range(1, total_channels + 1):
                 await self.add_device(f"{instance_id}-{channel}", instance_id, str(channel))
@@ -229,56 +236,59 @@ class ZoneRuntime:
         scenario event would), just triggered by an operator clicking a
         Devices-tab test control instead of the scenario player reaching
         this device's next scheduled tick. Valve/light state is level-
-        triggered and simply stays as set."""
+        triggered and simply stays as set. Routing/watchdog/global-scaling
+        logic itself lives in _dispatch_device_state, shared with
+        _handle_device_event -- this used to be a second copy of that
+        logic that had quietly fallen out of sync (it never applied
+        global_speed/global_brightness), so an operator running a manual
+        test while SET_GLOBAL_SPEED was active got the raw, unscaled value
+        on the wire instead of what the rest of the zone was seeing."""
+        if self._dispatch_device_state(device_id, parameters) is None:
+            if device_id not in self.device_map:
+                raise RuntimeError(f"unknown device '{device_id}'")
+            raise RuntimeError(f"instance for '{device_id}' not found")
+
+    # -- scheduler callback, injected into ZoneScenarioPlayer -------------------
+
+    def _handle_device_event(self, event: Event) -> None:
+        if self._dispatch_device_state(event.device_id, event.parameters) is None:
+            logger.warning("zone %s: event for unregistered device %s", self.zone_id, event.device_id)
+
+    def _dispatch_device_state(self, device_id: str, parameters: dict) -> tuple[str, str] | None:
+        """Shared by set_device_state (operator-triggered) and
+        _handle_device_event (scenario-triggered): routing lookup,
+        motor-watchdog registration, and global_speed/global_brightness
+        scaling. Only motors opt into the watchdog: valve/light states are
+        level-triggered (stay in whatever state they were last set to), a
+        running VFD is not -- it must be continuously re-affirmed or
+        ZoneScenarioPlayer's watchdog force-stops it (Step 3 safety net).
+        Returns the (instance_id, channel) routing on success, or None if
+        the device or its instance isn't found -- callers decide how to
+        report that (raise vs. log-and-return)."""
         routing = self.device_map.get(device_id)
         if not routing:
-            raise RuntimeError(f"unknown device '{device_id}'")
+            return None
         instance_id, channel = routing
         instance = self.driver_instances.get(instance_id)
         if not instance:
-            raise RuntimeError(f"instance for '{device_id}' not found")
+            return None
 
-        if self.device_categories.get(device_id) == DeviceCategory.MOTOR:
+        category = self.device_categories.get(device_id)
+        parameters = dict(parameters)
+
+        if category == DeviceCategory.MOTOR:
             if parameters.get("active", False):
                 self.player.active_devices[device_id] = time.monotonic()
             else:
                 self.player.active_devices.pop(device_id, None)
 
-        instance.apply_state(channel, parameters)
-
-    # -- scheduler callback, injected into ZoneScenarioPlayer -------------------
-
-    def _handle_device_event(self, event: Event) -> None:
-        routing = self.device_map.get(event.device_id)
-        if not routing:
-            logger.warning("zone %s: event for unregistered device %s", self.zone_id, event.device_id)
-            return
-
-        instance_id, channel = routing
-        instance = self.driver_instances.get(instance_id)
-        if not instance:
-            return
-
-        category = self.device_categories.get(event.device_id)
-        parameters = event.parameters
-
-        # Only motors opt into the watchdog: valve/light states are
-        # level-triggered (stay in whatever state they were last set to),
-        # a running VFD is not -- it must be continuously re-affirmed or
-        # ZoneScenarioPlayer's watchdog force-stops it (Step 3 safety net).
-        if category == DeviceCategory.MOTOR:
-            if parameters.get("active", False):
-                self.player.active_devices[event.device_id] = time.monotonic()
-            else:
-                self.player.active_devices.pop(event.device_id, None)
-
             if self.global_speed != 1.0 and "frequency" in parameters:
-                parameters = {**parameters, "frequency": parameters["frequency"] * self.global_speed}
+                parameters["frequency"] = parameters["frequency"] * self.global_speed
 
         elif category == DeviceCategory.LIGHT and self.global_brightness != 1.0:
-            parameters = {
-                **parameters,
-                **{k: parameters[k] * self.global_brightness for k in ("r", "g", "b") if k in parameters},
-            }
+            for channel_key in ("r", "g", "b"):
+                if channel_key in parameters:
+                    parameters[channel_key] = parameters[channel_key] * self.global_brightness
 
         instance.apply_state(channel, parameters)
+        return instance_id, channel
