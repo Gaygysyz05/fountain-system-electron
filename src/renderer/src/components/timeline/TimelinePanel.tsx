@@ -371,15 +371,24 @@ export function TimelinePanel(): JSX.Element {
       </div>
 
       {subView === "nozzles" ? (
+        // Keyed by zone too, not just "nozzles" -- without it, switching
+        // zones while staying on this tab left DeviceTablePanel's own
+        // local state (Grid/Timeline mode, Step size) mounted across the
+        // switch, so Zone B silently opened already in whatever mode/step
+        // the operator last left Zone A in.
         <DeviceTablePanel
-          key="nozzles"
+          key={`nozzles-${selectedZoneId}`}
           category="motor"
           columns={buildNozzleColumns(nozzlePairs)}
           instances={(selectedZone?.driver_instances ?? []).filter((i) => i.category === "motor" && nozzleInstanceIds.has(i.instance_id))}
         />
       ) : (
+        // Same reasoning as above -- `subView` alone distinguishes tabs
+        // but not zones, so a category with exactly one driver instance in
+        // both the old and new zone (the common case) never remounted on
+        // a zone switch either.
         <DeviceCategoryTabs
-          key={subView}
+          key={`${subView}-${selectedZoneId}`}
           category={CATEGORY_BY_SUBVIEW[subView]}
           devices={subView === "motors" ? standaloneMotors : scenarioDevices.filter((d) => d.category === CATEGORY_BY_SUBVIEW[subView])}
           instances={(selectedZone?.driver_instances ?? []).filter((i) => i.category === CATEGORY_BY_SUBVIEW[subView])}
