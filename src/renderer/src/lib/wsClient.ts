@@ -4,6 +4,27 @@ import { isAck } from "./protocol";
 export type ConnectionStatus = "connecting" | "open" | "closed";
 
 const ACK_TIMEOUT_MS = 5000;
+// The first several seconds this client spends trying to connect are the
+// ONE moment reconnecting fast actually matters -- main/index.ts spawns
+// the daemon process alongside this renderer, so at EVERY app launch
+// there's a real window where nothing is listening on the WS port yet,
+// not because the daemon is down but because it simply hasn't finished
+// starting (Python interpreter + imports + binding the socket -- ~100-
+// 300ms in practice now that lifespan no longer blocks on hardware
+// connects, but dev-mode/first-launch overhead can push that out).
+// A WS connect attempt against a closed port costs nothing, so there's
+// no reason to back off during that window the way there is once the
+// daemon looks like it might genuinely be unreachable -- the original
+// flat 500ms-then-x1.5 schedule could take 4+ seconds to land its first
+// retry after the daemon actually became reachable, which read as the
+// daemon itself being slow when it was really just this client's own
+// backoff not catching up yet. Retries stay flat at
+// FAST_RECONNECT_DELAY_MS for the first FAST_RECONNECT_WINDOW_MS of
+// continuous failure, then fall back to the original exponential growth
+// (see scheduleReconnect) so a genuinely dead daemon doesn't get
+// hammered forever.
+const FAST_RECONNECT_DELAY_MS = 250;
+const FAST_RECONNECT_WINDOW_MS = 8_000;
 const MAX_RECONNECT_DELAY_MS = 10_000;
 
 function makeId(): string {
@@ -25,7 +46,10 @@ export class DaemonClient {
   private ws: WebSocket | null = null;
   private url: string;
   private status: ConnectionStatus = "closed";
+  // Only used once FAST_RECONNECT_WINDOW_MS of continuous failure has
+  // elapsed -- see scheduleReconnect and the constants above.
   private reconnectDelay = 500;
+  private reconnectingSince: number | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private intentionallyClosed = false;
 
@@ -110,6 +134,7 @@ export class DaemonClient {
     ws.onopen = () => {
       if (!isCurrent()) return;
       this.reconnectDelay = 500;
+      this.reconnectingSince = null;
       this.setStatus("open");
     };
 
@@ -151,11 +176,14 @@ export class DaemonClient {
 
   private scheduleReconnect(): void {
     if (this.reconnectTimer) return;
+    if (this.reconnectingSince === null) this.reconnectingSince = Date.now();
+    const inFastWindow = Date.now() - this.reconnectingSince < FAST_RECONNECT_WINDOW_MS;
+    const delay = inFastWindow ? FAST_RECONNECT_DELAY_MS : this.reconnectDelay;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, MAX_RECONNECT_DELAY_MS);
+      if (!inFastWindow) this.reconnectDelay = Math.min(this.reconnectDelay * 1.5, MAX_RECONNECT_DELAY_MS);
       this.openSocket();
-    }, this.reconnectDelay);
+    }, delay);
   }
 
   private rejectAllPending(err: Error): void {
