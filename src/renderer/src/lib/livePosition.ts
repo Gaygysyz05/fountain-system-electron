@@ -22,8 +22,15 @@ export interface ZonePosition {
  */
 export const zonePositions = new Map<number, ZonePosition>();
 
-daemonClient.onEvent((event) => {
+const unsubscribe = daemonClient.onEvent((event) => {
   if (event.type === "zone_status") {
     zonePositions.set(event.zone_id, { position: event.position, duration: event.duration });
   }
 });
+
+// Same dev-mode HMR concern as zonesStore.ts's matching comment --
+// daemonClient outlives this module's own HMR lifecycle, so a reload
+// without this would stack one more duplicate event listener on every edit.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => unsubscribe());
+}

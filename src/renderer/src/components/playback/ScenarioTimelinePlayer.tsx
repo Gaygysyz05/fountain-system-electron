@@ -4,6 +4,7 @@ import { describeError } from "../../lib/errors";
 import { formatTime } from "../../lib/formatTime";
 import { resolveDeviceIds } from "../../lib/scenario";
 import { zonePositions } from "../../lib/livePosition";
+import { useLiveTick } from "../../lib/useLiveTick";
 import { getContrastTextClass, groupDevicesByInstance } from "../timeline/deviceColumns";
 import { useConnectionStore } from "../../store/connectionStore";
 import { TransportButtons } from "./TransportButtons";
@@ -90,23 +91,19 @@ export function ScenarioTimelinePlayer({
     };
   }, [scenarioId, reloadKey]);
 
-  useEffect(() => {
-    let frame: number;
-    const tick = (): void => {
-      if (!isDraggingRef.current) {
-        const live = zonePositions.get(zoneId);
-        const x = live ? live.position * pxPerSecond : 0;
-        if (playheadRef.current) playheadRef.current.style.transform = `translateX(${x}px)`;
-        if (playheadLabelRef.current) {
-          playheadLabelRef.current.style.transform = `translateX(${x}px)`;
-          if (live) playheadLabelRef.current.textContent = formatTime(live.position);
-        }
+  // Driven by the shared rAF loop in lib/useLiveTick.ts, not its own --
+  // see that file's comment.
+  useLiveTick(() => {
+    if (!isDraggingRef.current) {
+      const live = zonePositions.get(zoneId);
+      const x = live ? live.position * pxPerSecond : 0;
+      if (playheadRef.current) playheadRef.current.style.transform = `translateX(${x}px)`;
+      if (playheadLabelRef.current) {
+        playheadLabelRef.current.style.transform = `translateX(${x}px)`;
+        if (live) playheadLabelRef.current.textContent = formatTime(live.position);
       }
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [zoneId, pxPerSecond]);
+    }
+  });
 
   // Shift+wheel zooms instead of scrolling -- plain wheel still scrolls the
   // timeline normally. Needs a native, non-passive listener: React's

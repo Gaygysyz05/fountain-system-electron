@@ -1,14 +1,16 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 import { formatTime } from "../../lib/formatTime";
 import { zonePositions } from "../../lib/livePosition";
+import { useLiveTick } from "../../lib/useLiveTick";
 import { useConnectionStore } from "../../store/connectionStore";
 
 /**
- * Reads `zonePositions` (see lib/livePosition.ts) directly inside a
- * requestAnimationFrame loop and writes to the DOM through a ref -- no
- * React state, no re-render, even though this updates ~20 times a second
- * while a zone is playing. Same non-blocking pattern as ScenePreview.tsx's
- * useFrame, just driven by rAF instead of the R3F render loop.
+ * Reads `zonePositions` (see lib/livePosition.ts) directly inside the
+ * shared rAF loop (lib/useLiveTick.ts) and writes to the DOM through a
+ * ref -- no React state, no re-render, even though this updates ~20 times
+ * a second while a zone is playing. Same non-blocking pattern as
+ * ScenePreview.tsx's useFrame, just driven by rAF instead of the R3F
+ * render loop.
  */
 export function LiveTimecode({ zoneId, className }: { zoneId: number; className?: string }): JSX.Element {
   const ref = useRef<HTMLSpanElement>(null);
@@ -17,18 +19,12 @@ export function LiveTimecode({ zoneId, className }: { zoneId: number; className?
   // genuinely stalled show without this.
   const connected = useConnectionStore((s) => s.status === "open");
 
-  useEffect(() => {
-    let frame: number;
-    const tick = (): void => {
-      const live = zonePositions.get(zoneId);
-      if (ref.current) {
-        ref.current.textContent = live ? `${formatTime(live.position)} / ${formatTime(live.duration)}` : "--:-- / --:--";
-      }
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [zoneId]);
+  useLiveTick(() => {
+    const live = zonePositions.get(zoneId);
+    if (ref.current) {
+      ref.current.textContent = live ? `${formatTime(live.position)} / ${formatTime(live.duration)}` : "--:-- / --:--";
+    }
+  });
 
   return (
     <span

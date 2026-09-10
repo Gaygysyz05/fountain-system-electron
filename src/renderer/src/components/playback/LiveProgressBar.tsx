@@ -1,12 +1,14 @@
-import { useEffect, useRef } from "react";
+import { useRef } from "react";
 import { zonePositions } from "../../lib/livePosition";
+import { useLiveTick } from "../../lib/useLiveTick";
 import { useConnectionStore } from "../../store/connectionStore";
 
 /**
- * Scenario position as a fill bar. Same non-blocking rAF pattern as
+ * Scenario position as a fill bar. Same non-blocking pattern as
  * LiveTimecode.tsx -- reads `zonePositions` directly and writes the fill
  * width through a ref, no React state, even though this updates ~20 times a
- * second while a zone is playing.
+ * second while a zone is playing. Driven by the shared rAF loop in
+ * lib/useLiveTick.ts, not its own -- see that file's comment.
  */
 export function LiveProgressBar({ zoneId }: { zoneId: number }): JSX.Element {
   const fillRef = useRef<HTMLDivElement>(null);
@@ -18,17 +20,11 @@ export function LiveProgressBar({ zoneId }: { zoneId: number }): JSX.Element {
   // genuinely stalled show.
   const connected = useConnectionStore((s) => s.status === "open");
 
-  useEffect(() => {
-    let frame: number;
-    const tick = (): void => {
-      const live = zonePositions.get(zoneId);
-      const pct = live && live.duration > 0 ? Math.min(100, (live.position / live.duration) * 100) : 0;
-      if (fillRef.current) fillRef.current.style.width = `${pct}%`;
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(frame);
-  }, [zoneId]);
+  useLiveTick(() => {
+    const live = zonePositions.get(zoneId);
+    const pct = live && live.duration > 0 ? Math.min(100, (live.position / live.duration) * 100) : 0;
+    if (fillRef.current) fillRef.current.style.width = `${pct}%`;
+  });
 
   return (
     <div
