@@ -98,8 +98,20 @@ export function DeviceTable({
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    // Throttled to one setScrollTop per animation frame, not one per
+    // scroll event -- a fast trackpad/momentum scroll can fire scroll
+    // events far more often than the display can even paint, and every
+    // one used to trigger a full React state update (recomputing
+    // startIndex/endIndex and re-rendering the visible row range) even
+    // though only the LATEST position by the next frame ever actually
+    // matters.
+    let rafHandle: number | null = null;
     function onScroll(): void {
-      setScrollTop(el!.scrollTop);
+      if (rafHandle !== null) return;
+      rafHandle = requestAnimationFrame(() => {
+        rafHandle = null;
+        setScrollTop(el!.scrollTop);
+      });
     }
     const ro = new ResizeObserver(() => setViewportHeight(el!.clientHeight));
     ro.observe(el);
@@ -108,6 +120,7 @@ export function DeviceTable({
     return () => {
       el.removeEventListener("scroll", onScroll);
       ro.disconnect();
+      if (rafHandle !== null) cancelAnimationFrame(rafHandle);
     };
   }, []);
 
