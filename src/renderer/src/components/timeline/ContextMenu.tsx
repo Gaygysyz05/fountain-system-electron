@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 
 export interface MenuItem {
   label: string;
@@ -32,6 +32,25 @@ export function ContextMenu({
   minWidthClassName?: string;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
+
+  // A right-click near the window's right/bottom edge used to render the
+  // menu partially (or entirely) off-screen -- `x`/`y` are the raw click
+  // coordinates with no clamping against the actual viewport, easy to hit
+  // on this app's fullscreen kiosk layout with a wide device table. The
+  // menu's own size isn't known until it's rendered, so this measures and
+  // corrects via direct style mutation in a layout effect (runs before
+  // paint) rather than React state -- no visible jump from an initial
+  // off-screen position to the clamped one.
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const margin = 4;
+    const maxLeft = window.innerWidth - rect.width - margin;
+    const maxTop = window.innerHeight - rect.height - margin;
+    el.style.left = `${Math.max(margin, Math.min(x, maxLeft))}px`;
+    el.style.top = `${Math.max(margin, Math.min(y, maxTop))}px`;
+  }, [x, y]);
 
   useEffect(() => {
     function onDown(e: MouseEvent): void {

@@ -114,7 +114,11 @@ export function PatternTool({
           </label>
         )}
 
-        <button onClick={apply} className="h-control rounded-control bg-primary px-md text-sm text-text-primary hover:bg-primary-hover">
+        <button
+          onClick={apply}
+          disabled={selected.size === 0}
+          className="h-control rounded-control bg-primary px-md text-sm text-text-primary hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-primary"
+        >
           Apply to {selected.size} valve{selected.size === 1 ? "" : "s"}
         </button>
       </div>

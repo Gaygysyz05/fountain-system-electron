@@ -72,7 +72,14 @@ export function AuditLogPanel(): JSX.Element {
           </thead>
           <tbody>
             {entries.map((entry, i) => (
-              <tr key={i} className="border-t border-border">
+              // AuditLogEntryDto carries no id of its own (see
+              // persistence.py's append_audit_entry) -- ts+command+i is a
+              // more stable key than the bare index alone, though the
+              // whole list is atomically replaced on every refresh anyway
+              // (no per-row local state or animation this table needs to
+              // preserve identity across), so this was never actually
+              // wrong in practice, just not the idiomatic key choice.
+              <tr key={`${entry.ts}-${entry.command}-${i}`} className="border-t border-border">
                 <td className="whitespace-nowrap px-sm py-xs font-mono text-xs text-text-secondary">{formatTimestamp(entry.ts)}</td>
                 <td className="px-sm py-xs text-text-primary">{entry.command}</td>
                 <td className="px-sm py-xs text-text-secondary">{zoneName(entry.zone_id)}</td>
