@@ -35,6 +35,12 @@ class ZoneRuntime:
         self.device_map: dict[str, tuple[str, str]] = {}  # device_id -> (instance_id, channel)
         self.device_categories: dict[str, DeviceCategory] = {}
         self.device_nozzle_info: dict[str, tuple[str, int]] = {}  # device_id -> (nozzle_group, inverter 1|2), motor devices only
+        # device_id -> the last BASE (pre-global-scaling) parameters applied
+        # to it, from either a scenario event or a manual set_device_state.
+        # Exists purely so set_global_brightness/_speed (below) can
+        # immediately re-derive and re-send a live device's on-the-wire
+        # state against the NEW multiplier -- see their docstring.
+        self.device_last_parameters: dict[str, dict] = {}
 
         # Global live-control multipliers (SET_GLOBAL_BRIGHTNESS/_SPEED).
         # Applied here, not in ZoneScenarioPlayer, because the scheduler is
@@ -52,10 +58,29 @@ class ZoneRuntime:
         self.name = (name or "").strip() or None
 
     def set_global_brightness(self, value: int) -> None:
+        """Valve/light/motor state is level-triggered (stays exactly as
+        last set until something changes it -- see _dispatch_device_state)
+        -- this used to only update the multiplier itself, so a light
+        already lit when the operator dragged this slider stayed at its
+        OLD brightness on the actual hardware until that device's next
+        scenario cue, which could be seconds away or might never come
+        again for the rest of the show. Re-dispatching every live light's
+        last known base parameters makes the change visible immediately,
+        same as a scenario event would."""
         self.global_brightness = max(0.0, min(1.0, value / 100.0))
+        self._reapply_live_devices(DeviceCategory.LIGHT)
 
     def set_global_speed(self, value: int) -> None:
+        """Same gap as set_global_brightness above, for motors: a running
+        VFD's actual output frequency used to stay unscaled until its next
+        scenario event."""
         self.global_speed = max(0.0, min(1.0, value / 100.0))
+        self._reapply_live_devices(DeviceCategory.MOTOR)
+
+    def _reapply_live_devices(self, category: DeviceCategory) -> None:
+        for device_id, parameters in list(self.device_last_parameters.items()):
+            if self.device_categories.get(device_id) == category:
+                self._dispatch_device_state(device_id, parameters)
 
     # -- driver instances (physical connections) ------------------------------
 
@@ -163,6 +188,7 @@ class ZoneRuntime:
         self.device_map.pop(device_id, None)
         self.device_categories.pop(device_id, None)
         self.device_nozzle_info.pop(device_id, None)
+        self.device_last_parameters.pop(device_id, None)
         self.player.active_devices.pop(device_id, None)
 
     # -- lifecycle --------------------------------------------------------------
@@ -179,6 +205,7 @@ class ZoneRuntime:
         self.device_map.clear()
         self.device_categories.clear()
         self.device_nozzle_info.clear()
+        self.device_last_parameters.clear()
 
     async def emergency_stop(self) -> None:
         """Must never raise: called from the command handler's error path too.
@@ -275,6 +302,11 @@ class ZoneRuntime:
 
         category = self.device_categories.get(device_id)
         parameters = dict(parameters)
+        # Stored BEFORE scaling mutates `parameters` below -- this is the
+        # BASE value set_global_brightness/_speed re-derives from when an
+        # operator changes the multiplier without a new scenario event
+        # ever touching this device again (see _reapply_live_devices).
+        self.device_last_parameters[device_id] = dict(parameters)
 
         if category == DeviceCategory.MOTOR:
             if parameters.get("active", False):

@@ -200,6 +200,43 @@ async def test_set_device_state_applies_global_brightness_scaling() -> None:
     assert light.applied == [("1", {"r": 100.0, "g": 50.0, "b": 0.0})]
 
 
+async def test_set_global_speed_retroactively_rescales_an_already_running_motor() -> None:
+    """SET_GLOBAL_SPEED used to only change the multiplier itself -- a
+    motor's actual on-the-wire frequency is level-triggered (stays exactly
+    as last set), so it kept running at its OLD, unscaled frequency until
+    its next scenario event, which might be seconds away or might never
+    come again for the rest of the show. Changing the slider must be
+    reflected on the wire immediately, with no new event required."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    motor = FakeDriverInstance(DeviceCategory.MOTOR)
+    _register_fake_instance(zone, "inv1", motor)
+    await zone.add_device("M1", "inv1", "1")
+
+    zone.set_device_state("M1", {"frequency": 30.0, "active": True})
+    assert motor.applied[-1] == ("1", {"frequency": 30.0, "active": True})
+
+    zone.set_global_speed(50)  # global_speed = 0.5, no new device event fired
+
+    assert motor.applied[-1] == ("1", {"frequency": 15.0, "active": True})
+
+
+async def test_set_global_brightness_retroactively_rescales_an_already_lit_light() -> None:
+    """Same gap as set_global_speed above, for lights."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    light = FakeDriverInstance(DeviceCategory.LIGHT)
+    _register_fake_instance(zone, "inv1", light)
+    await zone.add_device("L1", "inv1", "1")
+
+    zone.set_device_state("L1", {"r": 200, "g": 100, "b": 0})
+    assert light.applied[-1] == ("1", {"r": 200, "g": 100, "b": 0})
+
+    zone.set_global_brightness(50)  # global_brightness = 0.5, no new device event fired
+
+    assert light.applied[-1] == ("1", {"r": 100.0, "g": 50.0, "b": 0.0})
+
+
 async def test_add_driver_instance_uses_the_schema_default_total_channels() -> None:
     """total_channels defaults to 32 on ModbusValveConfig when the raw
     config omits it entirely -- a real operator flow (the config form only
