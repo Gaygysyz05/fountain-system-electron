@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import { useConfigStore } from "../../store/configStore";
 import { useScenariosStore } from "../../store/scenariosStore";
 import { useZonesStore } from "../../store/zonesStore";
@@ -145,6 +145,17 @@ export function PlaybackPanel(): JSX.Element {
     void sendCommand({ command: "SET_LOOP", zone_id: timelineZoneId, enabled: next });
   }
 
+  // A stable reference (setSelectedScenarios itself never changes identity)
+  // so React.memo on ZoneControlCard below actually has something to work
+  // with -- an inline `(scenarioId) => ...` closure created fresh per card
+  // on every PlaybackPanel render would otherwise fail memo's prop
+  // comparison every time regardless, e.g. on every OTHER zone's status
+  // tick (this component reads the whole zonesStore.zones map via
+  // liveZones above, so any zone's transition re-renders it).
+  const handleSelectScenario = useCallback((zoneId: number, scenarioId: string) => {
+    setSelectedScenarios((prev) => ({ ...prev, [zoneId]: scenarioId }));
+  }, []);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex shrink-0 items-center justify-between border-b border-border px-xl pt-lg">
@@ -216,7 +227,7 @@ export function PlaybackPanel(): JSX.Element {
                 zone={zone}
                 scenarios={scenarios}
                 selectedScenarioId={selectedScenarios[zone.zone_id] ?? ""}
-                onSelectScenario={(scenarioId) => setSelectedScenarios((prev) => ({ ...prev, [zone.zone_id]: scenarioId }))}
+                onSelectScenario={handleSelectScenario}
               />
             ))}
           </div>
@@ -245,8 +256,18 @@ export function PlaybackPanel(): JSX.Element {
  * to PlaybackPanel (selectedScenarioId/onSelectScenario) so "Play All"
  * there can see every zone's current pick. Rendered once per configured
  * zone in the Controls grid, every one independently playable at the same
- * time -- or all together via Play All. */
-function ZoneControlCard({
+ * time -- or all together via Play All.
+ *
+ * Wrapped in React.memo: PlaybackPanel re-renders on ANY zone's status
+ * transition (it reads the whole zonesStore.zones map for its own
+ * defaulting effects), which without this would re-render every OTHER
+ * zone's card too even though this component's own useZonesStore selector
+ * below is already correctly scoped to just its own zone_id. Only works
+ * because `zone`/`scenarios` stay referentially stable across such a
+ * re-render (separate stores, untouched by a zonesStore-only update) and
+ * onSelectScenario is now a single stable callback from the parent rather
+ * than a fresh per-card closure. */
+const ZoneControlCard = memo(function ZoneControlCard({
   zone,
   scenarios,
   selectedScenarioId,
@@ -255,7 +276,7 @@ function ZoneControlCard({
   zone: ZoneConfigDto;
   scenarios: ScenarioDto[];
   selectedScenarioId: string;
-  onSelectScenario: (scenarioId: string) => void;
+  onSelectScenario: (zoneId: number, scenarioId: string) => void;
 }): JSX.Element {
   const sendCommand = useConnectionStore((s) => s.sendCommand);
 
@@ -316,7 +337,7 @@ function ZoneControlCard({
 
       <select
         value={selectedScenarioId}
-        onChange={(e) => onSelectScenario(e.target.value)}
+        onChange={(e) => onSelectScenario(zone.zone_id, e.target.value)}
         className="h-control rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
       >
         {scenarios.length === 0 && <option value="">No scenarios found</option>}
@@ -336,4 +357,4 @@ function ZoneControlCard({
       />
     </div>
   );
-}
+});
