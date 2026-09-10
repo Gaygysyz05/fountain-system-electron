@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTimelineStore } from "../../store/timelineStore";
 import { formatTime } from "../../lib/formatTime";
 import { buildToggleSpans, type ToggleSpan, type WireEvent } from "../playback/scenarioTimeline";
@@ -118,7 +118,15 @@ export function PianoRollEditor({
     return map;
   }, [devices, field, category, wireEvents, duration]);
 
-  function beginDrag(deviceId: string, mode: DragMode, idx: number, rowLeft: number, downClientX: number): void {
+  // useCallback, not a plain function: onRowMouseDown/onSpanMouseDown
+  // below depend on it and are themselves memoized so PianoRollRow's
+  // React.memo has stable callback props to compare against -- see that
+  // component's own comment for why. Its OWN dependencies (spansByDevice,
+  // duration, commitChannelSpans, field) don't change mid-drag (spansByDevice
+  // is only rebuilt when file.events itself changes, which happens on
+  // commit, not on every mousemove), so this reference stays stable for
+  // the whole duration of a drag too.
+  const beginDrag = useCallback((deviceId: string, mode: DragMode, idx: number, rowLeft: number, downClientX: number): void => {
     // Force-close any drag left over from an off-window mouseup before
     // this one attaches its own listeners -- see dragCleanupRef's comment.
     dragCleanupRef.current?.();
@@ -203,18 +211,24 @@ export function PianoRollEditor({
     window.addEventListener("mouseup", onUp);
     window.addEventListener("blur", onBlur);
     dragCleanupRef.current = cleanup;
-  }
+  }, [spansByDevice, duration, commitChannelSpans, field]);
 
-  function onRowMouseDown(deviceId: string, e: React.MouseEvent<HTMLDivElement>): void {
-    beginDrag(deviceId, "create", -1, e.currentTarget.getBoundingClientRect().left, e.clientX);
-  }
+  const onRowMouseDown = useCallback(
+    (deviceId: string, e: React.MouseEvent<HTMLDivElement>): void => {
+      beginDrag(deviceId, "create", -1, e.currentTarget.getBoundingClientRect().left, e.clientX);
+    },
+    [beginDrag],
+  );
 
-  function onSpanMouseDown(deviceId: string, idx: number, mode: DragMode, e: React.MouseEvent<HTMLDivElement>): void {
-    e.stopPropagation();
-    const spanEl = mode === "move" ? e.currentTarget : e.currentTarget.parentElement;
-    const rowLeft = spanEl?.parentElement?.getBoundingClientRect().left ?? 0;
-    beginDrag(deviceId, mode, idx, rowLeft, e.clientX);
-  }
+  const onSpanMouseDown = useCallback(
+    (deviceId: string, idx: number, mode: DragMode, e: React.MouseEvent<HTMLDivElement>): void => {
+      e.stopPropagation();
+      const spanEl = mode === "move" ? e.currentTarget : e.currentTarget.parentElement;
+      const rowLeft = spanEl?.parentElement?.getBoundingClientRect().left ?? 0;
+      beginDrag(deviceId, mode, idx, rowLeft, e.clientX);
+    },
+    [beginDrag],
+  );
 
   function deleteSelected(): void {
     if (!selected) return;
@@ -253,55 +267,118 @@ export function PianoRollEditor({
         </div>
 
         {devices.map((device, rowIndex) => {
-          const spans = spansByDevice.get(device.device_id) ?? [];
           const isDraggingRow = drag?.deviceId === device.device_id;
-          const zebraClass = rowIndex % 2 === 0 ? "bg-bg-surface1" : "bg-bg-base";
-
           return (
-            <div key={device.device_id} className="flex" style={{ height: ROW_HEIGHT }}>
-              <div
-                title={device.device_id}
-                className={`sticky left-0 z-10 flex shrink-0 items-center border-r border-bg-surface2 pl-md font-mono text-xs font-medium text-text-secondary ${zebraClass}`}
-                style={{ width: LABEL_WIDTH }}
-              >
-                {device.label}
-              </div>
-              <div
-                onMouseDown={(e) => onRowMouseDown(device.device_id, e)}
-                className={`relative h-full cursor-crosshair ${zebraClass}`}
-                style={{ width: timelineWidth }}
-              >
-                <div className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-bg-surface3" />
-                {spans.map((s, idx) => {
-                  const isBeingDragged = isDraggingRow && drag?.idx === idx && drag.mode !== "create";
-                  const start = isBeingDragged ? drag!.liveStart : s.start;
-                  const end = isBeingDragged ? drag!.liveEnd : s.end;
-                  const isSelected = selected?.deviceId === device.device_id && selected.idx === idx;
-                  return (
-                    <div
-                      key={idx}
-                      onMouseDown={(e) => onSpanMouseDown(device.device_id, idx, "move", e)}
-                      onClick={(e) => e.stopPropagation()}
-                      title={`${device.device_id}: ${start.toFixed(1)}s – ${end.toFixed(1)}s`}
-                      className={`absolute top-[7px] bottom-[7px] cursor-grab rounded-sm bg-success ${isSelected ? "ring-2 ring-accent" : ""}`}
-                      style={{ left: start * PX_PER_SECOND, width: Math.max(2, (end - start) * PX_PER_SECOND) }}
-                    >
-                      <div onMouseDown={(e) => onSpanMouseDown(device.device_id, idx, "resize-left", e)} className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize" />
-                      <div onMouseDown={(e) => onSpanMouseDown(device.device_id, idx, "resize-right", e)} className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize" />
-                    </div>
-                  );
-                })}
-                {isDraggingRow && drag?.mode === "create" && drag.moved && (
-                  <div
-                    className="pointer-events-none absolute top-[7px] bottom-[7px] rounded-sm bg-accent opacity-55"
-                    style={{ left: drag.liveStart * PX_PER_SECOND, width: Math.max(2, (drag.liveEnd - drag.liveStart) * PX_PER_SECOND) }}
-                  />
-                )}
-              </div>
-            </div>
+            <PianoRollRow
+              key={device.device_id}
+              device={device}
+              rowIndex={rowIndex}
+              spans={spansByDevice.get(device.device_id) ?? []}
+              timelineWidth={timelineWidth}
+              isDraggingRow={isDraggingRow}
+              dragMode={isDraggingRow ? (drag!.mode) : null}
+              dragMoved={isDraggingRow && drag!.moved}
+              dragIdx={isDraggingRow ? drag!.idx : -1}
+              dragLiveStart={isDraggingRow ? drag!.liveStart : 0}
+              dragLiveEnd={isDraggingRow ? drag!.liveEnd : 0}
+              isRowSelected={selected?.deviceId === device.device_id}
+              selectedIdx={selected?.deviceId === device.device_id ? selected.idx : -1}
+              onRowMouseDown={onRowMouseDown}
+              onSpanMouseDown={onSpanMouseDown}
+            />
           );
         })}
       </div>
     </div>
   );
 }
+
+/**
+ * One channel's row -- split out and memoized so a drag's per-mousemove
+ * setDrag() (see beginDrag above) only re-renders the ONE row actually
+ * being dragged, not all of them. Before this, every mousemove re-ran
+ * PianoRollEditor's whole render function -- cheap per row individually,
+ * but real, measurable wasted work across a 32-channel relay bank at
+ * drag speed. Only works because the parent passes primitives derived
+ * PER ROW (isDraggingRow, dragLiveStart, etc.) rather than the raw
+ * `drag`/`selected` state objects -- passing those directly would still
+ * give every row a "changed" prop on every tick regardless of whether it
+ * was the one being dragged.
+ */
+const PianoRollRow = memo(function PianoRollRow({
+  device,
+  rowIndex,
+  spans,
+  timelineWidth,
+  isDraggingRow,
+  dragMode,
+  dragMoved,
+  dragIdx,
+  dragLiveStart,
+  dragLiveEnd,
+  isRowSelected,
+  selectedIdx,
+  onRowMouseDown,
+  onSpanMouseDown,
+}: {
+  device: { device_id: string; label: string };
+  rowIndex: number;
+  spans: ToggleSpan[];
+  timelineWidth: number;
+  isDraggingRow: boolean;
+  dragMode: DragMode | null;
+  dragMoved: boolean;
+  dragIdx: number;
+  dragLiveStart: number;
+  dragLiveEnd: number;
+  isRowSelected: boolean;
+  selectedIdx: number;
+  onRowMouseDown: (deviceId: string, e: React.MouseEvent<HTMLDivElement>) => void;
+  onSpanMouseDown: (deviceId: string, idx: number, mode: DragMode, e: React.MouseEvent<HTMLDivElement>) => void;
+}): JSX.Element {
+  const zebraClass = rowIndex % 2 === 0 ? "bg-bg-surface1" : "bg-bg-base";
+
+  return (
+    <div className="flex" style={{ height: ROW_HEIGHT }}>
+      <div
+        title={device.device_id}
+        className={`sticky left-0 z-10 flex shrink-0 items-center border-r border-bg-surface2 pl-md font-mono text-xs font-medium text-text-secondary ${zebraClass}`}
+        style={{ width: LABEL_WIDTH }}
+      >
+        {device.label}
+      </div>
+      <div
+        onMouseDown={(e) => onRowMouseDown(device.device_id, e)}
+        className={`relative h-full cursor-crosshair ${zebraClass}`}
+        style={{ width: timelineWidth }}
+      >
+        <div className="pointer-events-none absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-bg-surface3" />
+        {spans.map((s, idx) => {
+          const isBeingDragged = isDraggingRow && dragIdx === idx && dragMode !== "create";
+          const start = isBeingDragged ? dragLiveStart : s.start;
+          const end = isBeingDragged ? dragLiveEnd : s.end;
+          const isSelected = isRowSelected && selectedIdx === idx;
+          return (
+            <div
+              key={idx}
+              onMouseDown={(e) => onSpanMouseDown(device.device_id, idx, "move", e)}
+              onClick={(e) => e.stopPropagation()}
+              title={`${device.device_id}: ${start.toFixed(1)}s – ${end.toFixed(1)}s`}
+              className={`absolute top-[7px] bottom-[7px] cursor-grab rounded-sm bg-success ${isSelected ? "ring-2 ring-accent" : ""}`}
+              style={{ left: start * PX_PER_SECOND, width: Math.max(2, (end - start) * PX_PER_SECOND) }}
+            >
+              <div onMouseDown={(e) => onSpanMouseDown(device.device_id, idx, "resize-left", e)} className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize" />
+              <div onMouseDown={(e) => onSpanMouseDown(device.device_id, idx, "resize-right", e)} className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize" />
+            </div>
+          );
+        })}
+        {isDraggingRow && dragMode === "create" && dragMoved && (
+          <div
+            className="pointer-events-none absolute top-[7px] bottom-[7px] rounded-sm bg-accent opacity-55"
+            style={{ left: dragLiveStart * PX_PER_SECOND, width: Math.max(2, (dragLiveEnd - dragLiveStart) * PX_PER_SECOND) }}
+          />
+        )}
+      </div>
+    </div>
+  );
+});
