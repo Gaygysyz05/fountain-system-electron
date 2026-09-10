@@ -3,6 +3,7 @@ import { useConfigStore } from "../../store/configStore";
 import { useConnectionStore } from "../../store/connectionStore";
 import { deviceStateKey, useZonesStore } from "../../store/zonesStore";
 import { nextFreeId, nextFreeIds } from "../../lib/nextFreeId";
+import { INPUT_CLASS } from "../../lib/styles";
 import { ChannelGrid } from "./ChannelGrid";
 import { SchemaForm } from "./SchemaForm";
 import type { DeviceType, ZoneConfigDto } from "../../lib/protocol";
@@ -103,7 +104,7 @@ export function DeviceConfigPanel(): JSX.Element {
         <select
           value={statusFilter}
           onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-          className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+          className={INPUT_CLASS}
         >
           <option value="all">Any status</option>
           <option value="connected">Connected only</option>
@@ -335,7 +336,7 @@ function AddDriverInstanceForm(props: {
             value={instanceId}
             onChange={(e) => setInstanceId(e.target.value)}
             placeholder="e.g. relay_bank_a"
-            className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+            className={INPUT_CLASS}
           />
         </label>
 
@@ -344,7 +345,7 @@ function AddDriverInstanceForm(props: {
           <select
             value={driverType}
             onChange={(e) => setDriverType(e.target.value)}
-            className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+            className={INPUT_CLASS}
           >
             {props.drivers.map((d) => (
               <option key={d.driver_type} value={d.driver_type}>
@@ -639,7 +640,7 @@ function InstanceCard(props: {
                           <select
                             value={editNozzleInverter}
                             onChange={(e) => setEditNozzleInverter(Number(e.target.value) as 1 | 2)}
-                            className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+                            className={INPUT_CLASS}
                           >
                             <option value={1}>1</option>
                             <option value={2}>2</option>
@@ -718,7 +719,7 @@ function InstanceCard(props: {
                     <input
                       value={deviceId}
                       onChange={(e) => setDeviceId(e.target.value)}
-                      className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+                      className={INPUT_CLASS}
                     />
                   </label>
                   <label className="flex flex-col gap-1 text-xs">
@@ -746,7 +747,7 @@ function InstanceCard(props: {
                           <select
                             value={nozzleInverter}
                             onChange={(e) => setNozzleInverter(Number(e.target.value) as 1 | 2)}
-                            className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+                            className={INPUT_CLASS}
                           >
                             <option value={1}>1</option>
                             <option value={2}>2</option>
@@ -1032,7 +1033,7 @@ function AddNozzleForm(props: {
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Gul"
-            className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+            className={INPUT_CLASS}
           />
         </label>
         <label className="flex flex-col gap-1 text-xs">

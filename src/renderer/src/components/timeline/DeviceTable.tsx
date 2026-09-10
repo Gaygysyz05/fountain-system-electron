@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTimelineStore } from "../../store/timelineStore";
 import { generateValvePattern, defaultParametersFor } from "../../lib/scenario";
+import { INPUT_CLASS } from "../../lib/styles";
 import type { DeviceType } from "../../lib/protocol";
 import {
   getColorHex,
@@ -641,7 +642,7 @@ export function DeviceTable({
                 if (e.key === "Enter") applyFrequencyPrompt();
                 if (e.key === "Escape") setFreqPromptOpen(false);
               }}
-              className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+              className={INPUT_CLASS}
             />
             <div className="flex justify-end gap-sm">
               <button

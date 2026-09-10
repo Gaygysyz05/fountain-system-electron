@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { INPUT_CLASS } from "../../lib/styles";
 
 interface JsonSchemaProperty {
   type?: "string" | "integer" | "number" | "boolean";
@@ -62,7 +63,7 @@ export function SchemaForm({ schema, onSubmit, submitLabel = "Add" }: SchemaForm
 
   const setField = (key: string, value: unknown): void => setValues((prev) => ({ ...prev, [key]: value }));
 
-  const inputClass = "h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none";
+  const inputClass = INPUT_CLASS;
 
   return (
     <form

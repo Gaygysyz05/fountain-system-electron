@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { useTimelineStore } from "../../store/timelineStore";
+import { INPUT_CLASS } from "../../lib/styles";
 import type { ValvePatternType } from "../../lib/scenario";
 
-const inputClass = "h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none";
+const inputClass = INPUT_CLASS;
 const buttonClass = "h-control rounded-control border border-border bg-bg-surface3 px-sm text-xs text-text-primary hover:bg-bg-surface2";
 
 /**

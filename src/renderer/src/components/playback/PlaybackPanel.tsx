@@ -3,6 +3,7 @@ import { useConfigStore } from "../../store/configStore";
 import { useScenariosStore } from "../../store/scenariosStore";
 import { useZonesStore } from "../../store/zonesStore";
 import { useConnectionStore } from "../../store/connectionStore";
+import { INPUT_CLASS } from "../../lib/styles";
 import { LiveTimecode } from "./LiveTimecode";
 import { LiveProgressBar } from "./LiveProgressBar";
 import { TransportButtons } from "./TransportButtons";
@@ -159,7 +160,7 @@ export function PlaybackPanel(): JSX.Element {
               <select
                 value={timelineZoneId ?? ""}
                 onChange={(e) => setTimelineZoneId(Number(e.target.value))}
-                className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+                className={INPUT_CLASS}
               >
                 {zones.map((z) => (
                   <option key={z.zone_id} value={z.zone_id}>

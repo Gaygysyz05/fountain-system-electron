@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useConfigStore } from "../../store/configStore";
 import { useZonesStore } from "../../store/zonesStore";
+import { INPUT_CLASS } from "../../lib/styles";
 
 const STATE_COLOR: Record<string, string> = {
   playing: "bg-success",
@@ -204,7 +205,7 @@ export function Sidebar({
           placeholder="Zone ID"
           value={newZoneId}
           onChange={(e) => setNewZoneId(e.target.value)}
-          className="h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
+          className={INPUT_CLASS}
         />
         <div className="flex gap-xs">
           <input

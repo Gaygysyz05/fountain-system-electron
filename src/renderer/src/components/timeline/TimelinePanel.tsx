@@ -5,6 +5,7 @@ import { useTimelineStore } from "../../store/timelineStore";
 import { describeError } from "../../lib/errors";
 import { restClient } from "../../lib/restClient";
 import { resolveDeviceIds } from "../../lib/scenario";
+import { INPUT_CLASS } from "../../lib/styles";
 import { useWheelStep } from "../../lib/useWheelStep";
 import { decodeAudioDuration } from "../../lib/waveform";
 import { DeviceCategoryTabs } from "./DeviceCategoryTabs";
@@ -179,7 +180,7 @@ export function TimelinePanel(): JSX.Element {
   const standaloneMotors = scenarioDevices.filter((d) => d.category === "motor" && !d.nozzle_group);
   const nozzleInstanceIds = new Set(nozzlePairs.flatMap((p) => [p.inv1?.instance_id, p.inv2?.instance_id]));
 
-  const fieldClass = "h-input rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none";
+  const fieldClass = INPUT_CLASS;
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
