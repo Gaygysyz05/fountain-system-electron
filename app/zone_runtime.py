@@ -84,7 +84,7 @@ class ZoneRuntime:
 
     # -- driver instances (physical connections) ------------------------------
 
-    async def add_driver_instance(self, instance_id: str, driver_type: str, config: dict) -> bool:
+    async def add_driver_instance(self, instance_id: str, driver_type: str, config: dict, connect: bool = True) -> bool:
         if instance_id in self.driver_instances:
             return self.driver_instances[instance_id].is_connected()
 
@@ -126,6 +126,15 @@ class ZoneRuntime:
             for channel in range(1, total_channels + 1):
                 await self.add_device(f"{instance_id}-{channel}", instance_id, str(channel))
 
+        # connect=False lets a caller register the instance's configuration
+        # (so it immediately shows up in GET /zones, and other instances
+        # queued alongside it aren't blocked waiting on this one) without
+        # dialing out yet -- see persistence.load_installation, which
+        # registers every configured instance up front and connects them
+        # all concurrently in the background afterward, rather than one at
+        # a time on the daemon's own startup path.
+        if not connect:
+            return False
         return await instance.connect()
 
     async def remove_driver_instance(self, instance_id: str) -> None:

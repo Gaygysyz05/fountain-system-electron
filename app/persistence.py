@@ -31,6 +31,7 @@ from typing import Callable, Optional
 
 from pydantic import BaseModel, Field
 
+from app.drivers.base import DriverInstance
 from app.zone_runtime import ZoneRuntime
 from app.zones.models import Event, Project
 
@@ -148,16 +149,28 @@ async def save_installation(zones: dict[int, ZoneRuntime]) -> None:
         logger.error("failed to write %s: %s", INSTALLATION_FILE, exc)
 
 
-async def load_installation(get_zone: Callable[[int], ZoneRuntime]) -> None:
+async def load_installation(get_zone: Callable[[int], ZoneRuntime]) -> list[tuple[int, str, DriverInstance]]:
+    """Registers every zone/instance/device from installation.json WITHOUT
+    connecting to hardware -- returns (zone_id, instance_id, instance) for
+    each registered instance so the caller can connect them itself,
+    concurrently, as a background task. This used to connect each
+    instance in turn, awaited right here, which on an install with several
+    boards meant the daemon's ASGI server didn't start accepting
+    connections -- including the HMI's own WS handshake -- until every
+    one of them had either connected or timed out, one after another. See
+    main.py's lifespan for where the returned instances actually get
+    connected."""
     if not INSTALLATION_FILE.exists():
         logger.info("no %s found, starting with no configured hardware", INSTALLATION_FILE)
-        return
+        return []
 
     try:
         payload = json.loads(INSTALLATION_FILE.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:
         logger.error("failed to read %s: %s -- starting with no configured hardware", INSTALLATION_FILE, exc)
-        return
+        return []
+
+    pending_connects: list[tuple[int, str, DriverInstance]] = []
 
     for zone_data in payload.get("zones", []):
         zone = get_zone(zone_data["zone_id"])
@@ -165,12 +178,8 @@ async def load_installation(get_zone: Callable[[int], ZoneRuntime]) -> None:
 
         for instance in zone_data.get("driver_instances", []):
             try:
-                ok = await zone.add_driver_instance(instance["instance_id"], instance["driver_type"], instance["config"])
-                if not ok:
-                    logger.warning(
-                        "zone %s: instance %s did not connect at startup, its own reconnect watchdog will keep retrying",
-                        zone_data["zone_id"], instance["instance_id"],
-                    )
+                await zone.add_driver_instance(instance["instance_id"], instance["driver_type"], instance["config"], connect=False)
+                pending_connects.append((zone_data["zone_id"], instance["instance_id"], zone.driver_instances[instance["instance_id"]]))
             except KeyError as exc:
                 logger.error("zone %s: skipping instance %s, unknown driver_type: %s",
                              zone_data["zone_id"], instance["instance_id"], exc)
@@ -182,6 +191,7 @@ async def load_installation(get_zone: Callable[[int], ZoneRuntime]) -> None:
             )
 
     logger.info("loaded installation config: %d zone(s)", len(payload.get("zones", [])))
+    return pending_connects
 
 
 def _list_scenarios_sync() -> list[dict]:

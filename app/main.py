@@ -29,7 +29,7 @@ from pydantic import TypeAdapter, ValidationError
 from app import config
 from app import drivers as _drivers  # noqa: F401 -- side-effect import, registers every built-in driver
 from app import persistence
-from app.drivers.base import DeviceCategory, list_drivers
+from app.drivers.base import DeviceCategory, DriverInstance, list_drivers
 from app.event_bus import EventBus
 from app.protocol import Ack, Command, HeartbeatEvent
 from app.zone_runtime import ZoneRuntime
@@ -115,19 +115,52 @@ async def _emergency_stop_all_zones() -> None:
     await asyncio.gather(*(z.emergency_stop() for z in zones.values()), return_exceptions=True)
 
 
+async def _connect_pending_instances(pending: list[tuple[int, str, DriverInstance]]) -> None:
+    """Connects every instance persistence.load_installation registered
+    (but deliberately didn't dial out for) concurrently, in the
+    background -- see that function's docstring for why this doesn't
+    happen inline in lifespan. Each instance's own driver already
+    publishes a HardwareErrorEvent/ConnectionStateEvent on failure (see
+    e.g. modbus_valve.py's connect()), so this only adds a startup-scoped
+    log line, not a second error-reporting path."""
+    if not pending:
+        return
+    results = await asyncio.gather(*(instance.connect() for _, _, instance in pending), return_exceptions=True)
+    for (zone_id, instance_id, _), result in zip(pending, results):
+        if isinstance(result, Exception):
+            logger.exception("zone %s: instance %s failed to connect at startup", zone_id, instance_id, exc_info=result)
+        elif not result:
+            logger.warning(
+                "zone %s: instance %s did not connect at startup, its own reconnect watchdog will keep retrying",
+                zone_id, instance_id,
+            )
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    await persistence.load_installation(get_zone)
+    pending_connects = await persistence.load_installation(get_zone)
+    # Connecting to hardware happens concurrently in the background, not
+    # awaited here -- see persistence.load_installation's docstring: an
+    # unreachable/slow board used to block the ENTIRE ASGI server --
+    # including the HMI's own WS handshake -- from accepting connections
+    # until every configured instance had connected or timed out, one
+    # after another, sometimes ten-plus seconds on an install with several
+    # boards and nothing plugged in yet.
+    connect_task = asyncio.create_task(_connect_pending_instances(pending_connects))
     schedule_task = asyncio.create_task(_schedule_loop())
     yield
+    connect_task.cancel()
     schedule_task.cancel()
-    # Await the cancellation rather than firing and moving straight on --
-    # otherwise the loop can still be mid-`_check_schedule()` (specifically
-    # mid `await zone.player.play()`) when cancel() returns, and only
-    # actually stop a few event-loop turns later. Racing that against
-    # _emergency_stop_all_zones() below risked the scheduler re-arming a
-    # zone's player right as shutdown was telling its driver instances to
-    # stop -- an emergency stop that gets silently undone a moment later.
+    # Await both cancellations rather than firing and moving straight on --
+    # otherwise either can still be mid-flight (the schedule loop
+    # specifically mid `await zone.player.play()`) when cancel() returns,
+    # and only actually stop a few event-loop turns later. Racing that
+    # against _emergency_stop_all_zones() below risked a delayed connect()
+    # or the scheduler re-arming a zone's player right as shutdown was
+    # telling its driver instances to stop -- an emergency stop that gets
+    # silently undone a moment later.
+    with suppress(asyncio.CancelledError):
+        await connect_task
     with suppress(asyncio.CancelledError):
         await schedule_task
     await _emergency_stop_all_zones()

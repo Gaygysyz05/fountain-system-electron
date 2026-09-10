@@ -11,8 +11,12 @@ import time
 
 import pytest
 
+import app.drivers  # noqa: F401 -- registers modbus_relay_valve etc. (see app/drivers/__init__.py)
 from app import persistence
+from app.event_bus import EventBus
 from app.persistence import ScenarioFileDto, ScheduleEntryDto
+from app.zone_runtime import ZoneRuntime
+from tests.fakes.fake_modbus import FakeModbusServer
 
 
 @pytest.fixture(autouse=True)
@@ -136,3 +140,54 @@ async def test_read_scenario_raw_does_not_block_the_event_loop(monkeypatch) -> N
     # "disk read" was blocked in a worker thread -- a plain synchronous
     # read would have starved tick_counter() for the full 0.2s instead.
     assert ticks >= 5
+
+
+async def test_load_installation_registers_without_connecting_to_hardware() -> None:
+    """load_installation used to connect each configured instance inline,
+    awaited one after another -- on an install with several boards and
+    nothing reachable yet, that blocked the daemon's own ASGI startup
+    (see main.py's lifespan) for however long every instance took to
+    connect or time out, in sequence. It must now only register the
+    configuration and hand back what still needs connecting, without
+    itself dialing out at all."""
+    async with FakeModbusServer() as server:
+        payload = {
+            "zones": [
+                {
+                    "zone_id": 1,
+                    "name": "Zone 1",
+                    "driver_instances": [
+                        {
+                            "instance_id": "rele1",
+                            "driver_type": "modbus_relay_valve",
+                            "config": {"host": server.host, "port": server.port},
+                        }
+                    ],
+                    "devices": [],
+                }
+            ]
+        }
+        persistence.INSTALLATION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        persistence.INSTALLATION_FILE.write_text(json.dumps(payload), encoding="utf-8")
+
+        bus = EventBus()
+        zones: dict[int, ZoneRuntime] = {}
+
+        def get_zone(zone_id: int) -> ZoneRuntime:
+            if zone_id not in zones:
+                zones[zone_id] = ZoneRuntime(zone_id, bus)
+            return zones[zone_id]
+
+        pending = await persistence.load_installation(get_zone)
+
+        assert len(pending) == 1
+        zone_id, instance_id, instance = pending[0]
+        assert (zone_id, instance_id) == (1, "rele1")
+        assert instance is zones[1].driver_instances["rele1"]
+        # Registered (shows up in GET /zones) but genuinely not connected --
+        # load_installation itself must never have called connect().
+        assert instance.is_connected() is False
+
+        await instance.connect()  # confirm it's a real, connectable instance
+        assert instance.is_connected() is True
+        await instance.disconnect()
