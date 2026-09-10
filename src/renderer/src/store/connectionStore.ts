@@ -13,7 +13,13 @@ interface ConnectionStore {
 }
 
 export const useConnectionStore = create<ConnectionStore>((set) => {
-  daemonClient.onStatusChange((status) => set({ status }));
+  const unsubscribe = daemonClient.onStatusChange((status) => set({ status }));
+  // See zonesStore.ts's matching comment -- without this, a dev-mode HMR
+  // reload of this module stacks one more duplicate status listener onto
+  // daemonClient on every edit.
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => unsubscribe());
+  }
 
   return {
     status: "closed",

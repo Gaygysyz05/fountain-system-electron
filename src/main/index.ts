@@ -108,6 +108,19 @@ function createWindow(): void {
     mainWindow?.show();
   });
 
+  // Without this, `mainWindow` keeps pointing at an already-destroyed
+  // BrowserWindow once the OS close button (or Alt+F4) fires -- the
+  // window itself is destroyed synchronously, but before-quit's graceful
+  // daemon shutdown can still be mid-flight for up to
+  // DAEMON_SHUTDOWN_TIMEOUT_MS afterward. Any code that runs during that
+  // gap and checks `if (mainWindow)` (second-instance's focus/restore,
+  // setDaemonStatus's webContents.send) would see a non-null but already-
+  // destroyed reference and throw "Object has been destroyed" instead of
+  // just skipping the no-longer-possible UI update.
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
+
   // F11 toggles fullscreen -- the standard OS convention for "let me out of
   // this", which a fullscreen kiosk-style panel otherwise has no window
   // border to grab for. Bound at the webContents level (before-input-event)
@@ -333,8 +346,13 @@ async function startDaemon(): Promise<void> {
 
     daemonRestartAttempts += 1;
     if (daemonRestartAttempts > MAX_DAEMON_RESTART_ATTEMPTS) {
+      // MAX_DAEMON_RESTART_ATTEMPTS restarts happen AFTER the original
+      // launch, so the daemon was actually spawned MAX+1 times total by
+      // the time this fires -- said explicitly here so the log's own
+      // count doesn't undercount by one against what actually happened.
       logLine(
-        `[daemon] gave up after ${MAX_DAEMON_RESTART_ATTEMPTS} restart attempts -- ` +
+        `[daemon] gave up after ${MAX_DAEMON_RESTART_ATTEMPTS} restart attempts ` +
+          `(${MAX_DAEMON_RESTART_ATTEMPTS + 1} total launches) -- ` +
           `run it manually (${command} ${args.join(" ")} in ${cwd}) to see the actual error`,
       );
       setDaemonStatus({ phase: "failed", maxAttempts: MAX_DAEMON_RESTART_ATTEMPTS });

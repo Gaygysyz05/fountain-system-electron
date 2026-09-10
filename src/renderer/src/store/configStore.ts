@@ -158,10 +158,17 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
 // happens to be racing it) keeps this resynced the same way zonesStore's
 // event stream keeps itself live.
 let previousConnectionStatus: ConnectionStatus | null = null;
-daemonClient.onStatusChange((status) => {
+const unsubscribeConfigStatus = daemonClient.onStatusChange((status) => {
   if (status === "open" && previousConnectionStatus !== null && previousConnectionStatus !== "open") {
     void useConfigStore.getState().loadDrivers();
     void useConfigStore.getState().loadZones();
   }
   previousConnectionStatus = status;
 });
+
+// See zonesStore.ts's matching comment -- daemonClient outlives this
+// module's own dev-mode HMR lifecycle, so a reload without this would
+// stack one more duplicate refetch-on-reconnect listener on every edit.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => unsubscribeConfigStatus());
+}

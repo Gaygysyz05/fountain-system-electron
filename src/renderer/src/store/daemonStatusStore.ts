@@ -17,8 +17,20 @@ interface DaemonStatusStore {
  * from there.
  */
 export const useDaemonStatusStore = create<DaemonStatusStore>((set) => {
-  window.electron.getDaemonStatus().then((status) => set({ status }));
-  window.electron.onDaemonStatus((status) => set({ status }));
+  // The one-shot getDaemonStatus() snapshot and the live onDaemonStatus
+  // push race each other: if a push arrives (e.g. the daemon transitions
+  // to "running") before that snapshot's IPC round-trip resolves, the
+  // snapshot lands SECOND and overwrites the newer live status with a
+  // stale one. Once any live push has been seen, the snapshot is no
+  // longer applied -- it only exists to cover the gap before the first push.
+  let livePushReceived = false;
+  window.electron.getDaemonStatus().then((status) => {
+    if (!livePushReceived) set({ status });
+  });
+  window.electron.onDaemonStatus((status) => {
+    livePushReceived = true;
+    set({ status });
+  });
 
   return {
     status: { phase: "starting" },

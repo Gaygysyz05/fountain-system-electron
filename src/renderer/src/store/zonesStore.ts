@@ -122,14 +122,14 @@ export const useZonesStore = create<ZonesStore>((set) => ({
 // long-closed tab's stale module-load-time timestamp would read as
 // "stale" for the first STALE_THRESHOLD_MS after reconnecting, before a
 // single real message has even had a chance to arrive.
-daemonClient.onStatusChange((status) => {
+const unsubscribeStatus = daemonClient.onStatusChange((status) => {
   if (status === "open") useZonesStore.setState({ lastMessageAt: Date.now(), stale: false });
 });
 
 // Polls rather than a per-message timer reset (cheaper: one setInterval
 // for the app's whole lifetime instead of clearTimeout/setTimeout on every
 // single incoming message, some of which arrive at ~20Hz during playback).
-setInterval(() => {
+const staleCheckInterval = setInterval(() => {
   if (useConnectionStore.getState().status !== "open") return;
   const { lastMessageAt, stale } = useZonesStore.getState();
   const isStale = Date.now() - lastMessageAt > STALE_THRESHOLD_MS;
@@ -139,6 +139,21 @@ setInterval(() => {
 // Wire the daemon's event stream into this store once, at module load. This
 // is the ONLY place `applyEvent` gets called from the live connection --
 // components never touch the socket directly, only this store's state.
-daemonClient.onEvent((event) => {
+const unsubscribeEvent = daemonClient.onEvent((event) => {
   useZonesStore.getState().applyEvent(event);
 });
+
+// Vite's dev-mode HMR re-runs this module's top-level code on every edit
+// to it (or anything that transitively invalidates up to here) -- but
+// `daemonClient` is a long-lived singleton that outlives this module's own
+// HMR lifecycle, so without tearing the PREVIOUS instance's subscriptions
+// down first, each reload stacks one more duplicate status listener,
+// interval, and event listener on top of the last. import.meta.hot is
+// undefined in a production build, so this is a no-op there.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    unsubscribeStatus();
+    clearInterval(staleCheckInterval);
+    unsubscribeEvent();
+  });
+}

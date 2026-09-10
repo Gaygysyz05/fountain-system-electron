@@ -146,7 +146,17 @@ export function DeviceTable({
       setIsSelecting(false);
     }
     window.addEventListener("mouseup", onUp);
-    return () => window.removeEventListener("mouseup", onUp);
+    // A mouseup that lands outside the window (releasing mid-drag on
+    // another monitor or application) never reaches this listener --
+    // isSelecting stayed stuck true, so the next mouse movement back over
+    // this table silently resumed extending the old selection rectangle
+    // with the button no longer even held down. `blur` is the reliable
+    // signal that the drag ended some other way.
+    window.addEventListener("blur", onUp);
+    return () => {
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onUp);
+    };
   }, []);
 
   // Selection/edit state holds row/col indices into `rowTimes` and

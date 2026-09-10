@@ -39,7 +39,18 @@ export class DaemonClient {
 
   connect(): void {
     this.intentionallyClosed = false;
+    const previous = this.ws;
     this.openSocket();
+    // Close the outgoing socket only AFTER openSocket() has already
+    // repointed `this.ws` at the new one -- a repeat connect() call (a
+    // remounted effect, React 18 StrictMode's dev-mode double-invoke, any
+    // future caller doing the same) used to just abandon whatever socket
+    // was already open/connecting, leaking one more live WebSocket per
+    // repeat call instead of closing it. Closing it BEFORE the reassignment
+    // would instead make ITS OWN onclose see isCurrent() still true and
+    // incorrectly schedule a reconnect that races the fresh connection
+    // openSocket() just started -- see openSocket()'s isCurrent() comment.
+    previous?.close();
   }
 
   disconnect(): void {
