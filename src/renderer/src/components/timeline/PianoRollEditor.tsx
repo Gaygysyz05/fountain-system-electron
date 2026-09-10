@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTimelineStore } from "../../store/timelineStore";
 import { buildToggleSpans, type ToggleSpan, type WireEvent } from "../playback/scenarioTimeline";
 import type { DeviceType } from "../../lib/protocol";
@@ -96,6 +96,20 @@ export function PianoRollEditor({
   const [selected, setSelected] = useState<{ deviceId: string; idx: number } | null>(null);
   const timelineWidth = duration * PX_PER_SECOND;
 
+  // Holds the in-flight drag's own listener-teardown, if any. A mouseup
+  // that lands outside the window (a fast drag off a multi-monitor setup,
+  // or released over another application) never reaches `window` at all --
+  // without this, that drag's mousemove/mouseup listeners stay attached
+  // forever, holding a stale closure over ITS OWN spans/anchorTime/idx.
+  // The next unrelated drag anywhere on this editor would then also
+  // trigger that zombie listener's mouseup handler, committing its stale
+  // snapshot of spans on top of whatever the new drag just did -- silent
+  // data corruption. beginDrag force-tears down any still-live previous
+  // drag before starting a new one, and the effect below does the same on
+  // unmount (e.g. switching back to Grid mode mid-drag).
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => dragCleanupRef.current?.(), []);
+
   // One flat WireEvent[] pass suffices for every device's buildToggleSpans
   // call below (it filters by device_id itself) -- avoids re-deriving a
   // per-device map for what's normally a couple dozen events at most.
@@ -110,6 +124,10 @@ export function PianoRollEditor({
   }, [devices, field, category, wireEvents, duration]);
 
   function beginDrag(deviceId: string, mode: DragMode, idx: number, rowLeft: number, downClientX: number): void {
+    // Force-close any drag left over from an off-window mouseup before
+    // this one attaches its own listeners -- see dragCleanupRef's comment.
+    dragCleanupRef.current?.();
+
     const spans = spansByDevice.get(deviceId) ?? [];
     const anchorTime = Math.max(0, Math.min(duration, (downClientX - rowLeft) / PX_PER_SECOND));
     const existing = idx >= 0 ? spans[idx] : null;
@@ -161,15 +179,35 @@ export function PianoRollEditor({
       commitChannelSpans(deviceId, field, [...rest, { start: snap(final.liveStart), end: snap(final.liveEnd) }]);
     }
 
-    const onMove = (ev: MouseEvent): void => setDrag(computeLive(ev.clientX));
-    const onUp = (ev: MouseEvent): void => {
+    let lastClientX = downClientX;
+    const onMove = (ev: MouseEvent): void => {
+      lastClientX = ev.clientX;
+      setDrag(computeLive(ev.clientX));
+    };
+    function cleanup(): void {
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("blur", onBlur);
+      dragCleanupRef.current = null;
+    }
+    const onUp = (ev: MouseEvent): void => {
+      cleanup();
       commit(computeLive(ev.clientX));
+      setDrag(null);
+    };
+    // A mouseup that lands outside the window (see dragCleanupRef's
+    // comment above) never fires `onUp` -- `blur` is the reliable signal
+    // that the drag ended some other way, using the last position we DID
+    // see rather than an event with no clientX of its own.
+    const onBlur = (): void => {
+      cleanup();
+      commit(computeLive(lastClientX));
       setDrag(null);
     };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+    window.addEventListener("blur", onBlur);
+    dragCleanupRef.current = cleanup;
   }
 
   function onRowMouseDown(deviceId: string, e: React.MouseEvent<HTMLDivElement>): void {

@@ -238,10 +238,20 @@ function ZoneEditor(props: {
   async function handleConnectAll(): Promise<void> {
     setConnectingAll(true);
     setConnectAllResult(null);
-    const { connected, total } = await props.onConnectAll();
-    setConnectingAll(false);
-    setConnectAllResult(connected === total ? `Connected ${connected}/${total}` : `Only ${connected}/${total} connected`);
-    setTimeout(() => setConnectAllResult(null), 5000);
+    // onConnectAll awaits both the WS command and a follow-up GET /zones --
+    // either can reject outright (a dropped connection mid-request, not
+    // just a rejected command), which used to leave this button stuck
+    // showing "Connecting..." (disabled) forever, since nothing after the
+    // await ever ran. The failure itself still surfaces via
+    // connectionStore.lastError -> StatusBar, same as every other command;
+    // this only has to guarantee the button always comes back.
+    try {
+      const { connected, total } = await props.onConnectAll();
+      setConnectAllResult(connected === total ? `Connected ${connected}/${total}` : `Only ${connected}/${total} connected`);
+      setTimeout(() => setConnectAllResult(null), 5000);
+    } finally {
+      setConnectingAll(false);
+    }
   }
 
   return (
@@ -379,10 +389,17 @@ function InstanceCard(props: {
   async function handleReconnect(): Promise<void> {
     setReconnecting(true);
     setReconnectResult(null);
-    const connected = await props.onReconnect();
-    setReconnecting(false);
-    setReconnectResult(connected ? "Connected" : "Failed to connect");
-    setTimeout(() => setReconnectResult(null), 5000);
+    // Same reasoning as ZoneEditor.handleConnectAll above: onReconnect
+    // (RECONNECT_INSTANCE + a follow-up refetch) can reject outright, not
+    // just resolve false, on a dropped connection mid-request -- without
+    // this try/finally the button stayed stuck on "Connecting..." forever.
+    try {
+      const connected = await props.onReconnect();
+      setReconnectResult(connected ? "Connected" : "Failed to connect");
+      setTimeout(() => setReconnectResult(null), 5000);
+    } finally {
+      setReconnecting(false);
+    }
   }
 
   const [showAddDevice, setShowAddDevice] = useState(false);

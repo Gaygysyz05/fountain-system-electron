@@ -53,10 +53,28 @@ export function TimelinePanel(): JSX.Element {
   const loadScenarios = useScenariosStore((s) => s.loadScenarios);
   const deleteScenario = useScenariosStore((s) => s.deleteScenario);
 
-  const {
-    scenarioId, file, dirty, saving, error, setError,
-    newScenario, loadScenario, saveScenario, setName, setDuration, setMusicFile, setDeviceIds,
-  } = useTimelineStore();
+  // Individual selectors, not the whole-store `useTimelineStore()` this
+  // used to be -- that subscribed to every field the store will EVER have
+  // (including ones this component doesn't read, like `loading`), so it
+  // re-rendered on every single store write regardless of relevance. Each
+  // re-render passes fresh, unmemoized `columns`/`instances` arrays down
+  // through DeviceCategoryTabs into DeviceTable, whose own effect resets
+  // grid selection/in-progress edits whenever `columns` changes identity
+  // (see DeviceTable.tsx) -- so an update that had nothing to do with the
+  // grid at all could still wipe whatever the operator was doing there.
+  const scenarioId = useTimelineStore((s) => s.scenarioId);
+  const file = useTimelineStore((s) => s.file);
+  const dirty = useTimelineStore((s) => s.dirty);
+  const saving = useTimelineStore((s) => s.saving);
+  const error = useTimelineStore((s) => s.error);
+  const setError = useTimelineStore((s) => s.setError);
+  const newScenario = useTimelineStore((s) => s.newScenario);
+  const loadScenario = useTimelineStore((s) => s.loadScenario);
+  const saveScenario = useTimelineStore((s) => s.saveScenario);
+  const setName = useTimelineStore((s) => s.setName);
+  const setDuration = useTimelineStore((s) => s.setDuration);
+  const setMusicFile = useTimelineStore((s) => s.setMusicFile);
+  const setDeviceIds = useTimelineStore((s) => s.setDeviceIds);
   const past = useTimelineStore((s) => s.past);
   const future = useTimelineStore((s) => s.future);
   const undo = useTimelineStore((s) => s.undo);

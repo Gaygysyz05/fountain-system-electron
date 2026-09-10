@@ -30,6 +30,14 @@ function defaultValueFor(prop: JsonSchemaProperty): unknown {
 function initialValues(schema: JsonSchema): Record<string, unknown> {
   const values: Record<string, unknown> = {};
   for (const [key, prop] of Object.entries(schema.properties ?? {})) {
+    // `config_schema` comes from the daemon's GET /drivers response --
+    // untrusted input as far as the renderer is concerned. A property
+    // literally named "__proto__" would, via this bracket assignment,
+    // reassign `values`'s own prototype instead of setting a normal
+    // field (JS's `__proto__` is a special accessor every plain object
+    // inherits from Object.prototype) -- skip it rather than let a
+    // malformed/malicious schema pollute this object's prototype chain.
+    if (key === "__proto__") continue;
     values[key] = defaultValueFor(prop);
   }
   return values;

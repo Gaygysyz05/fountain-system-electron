@@ -54,6 +54,24 @@ export function Sidebar({
   function handleAddZone(): void {
     const id = parseInt(newZoneId, 10);
     if (Number.isNaN(id)) return;
+
+    const existing = configuredZones.find((z) => z.zone_id === id);
+    if (existing) {
+      // A typo'd ID that happens to match a real, already-configured zone
+      // used to silently RENAME that zone to whatever was typed in the
+      // Name field here instead of creating anything new -- meaning to add
+      // "Zone 5" but fat-fingering "1" clobbered Zone 1's display name
+      // with no new zone appearing and nothing telling the operator what
+      // actually happened. Select the existing zone instead and say so,
+      // rather than guessing a rename was intended.
+      const label = existing.name?.trim() ? ` ("${existing.name}")` : "";
+      window.alert(`Zone ${id} already exists${label} -- selecting it instead of creating a new one.`);
+      selectZone(id);
+      setNewZoneId("");
+      setNewZoneName("");
+      return;
+    }
+
     selectZone(id); // the zone is created lazily on the daemon once a driver instance is added to it
     const name = newZoneName.trim();
     if (name) void renameZone(id, name); // RENAME_ZONE creates the zone runtime immediately, even with 0 devices -- see zone_runtime.get_zone
