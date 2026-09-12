@@ -1,8 +1,11 @@
 import { useRef, useState } from "react";
 import { Sidebar } from "./Sidebar";
 import { StatusBar } from "./StatusBar";
+import { StartupSplash } from "./StartupSplash";
 import { EmergencyStopButton } from "./EmergencyStopButton";
 import { ErrorBoundary } from "./ErrorBoundary";
+import { useConnectionStore } from "../../store/connectionStore";
+import { useDaemonStatusStore } from "../../store/daemonStatusStore";
 import { ScenePreview } from "../preview3d/ScenePreview";
 import { DeviceConfigPanel } from "../devices/DeviceConfigPanel";
 import { PlaybackPanel } from "../playback/PlaybackPanel";
@@ -23,6 +26,14 @@ type View = "timeline" | "playback" | "preview" | "devices" | "schedule" | "log"
 const SIDEBAR_COLLAPSED_KEY = "sidebarCollapsed";
 
 export function AppShell(): JSX.Element {
+  // Only ever true before the app's very first successful connection --
+  // see connectionStore's `everConnected` and StartupSplash's own comment
+  // for why a later reconnect (daemon restart mid-show) must NOT bring
+  // this back.
+  const everConnected = useConnectionStore((s) => s.everConnected);
+  const daemonFailed = useDaemonStatusStore((s) => s.status.phase === "failed");
+  const showStartupSplash = !everConnected && !daemonFailed;
+
   const [view, setView] = useState<View>("timeline");
   // The app menu (currently just "Settings") -- tucked behind the
   // "Fountain Control" button rather than sitting in the tab row as its
@@ -67,6 +78,12 @@ export function AppShell(): JSX.Element {
 
   return (
     <div className="flex h-screen flex-col">
+      {/* Overlaid, not rendered instead of everything below -- the whole
+          tab tree stays mounted underneath so its own data (zones,
+          scenarios, schedule) is already loading in the background and
+          ready the instant this disappears, matching "connect in the
+          background" rather than making the operator wait twice. */}
+      {showStartupSplash && <StartupSplash />}
       <header className="flex h-row shrink-0 items-center gap-md border-b border-border bg-bg-surface1 px-md text-sm text-text-secondary">
         <button
           ref={menuButtonRef}
