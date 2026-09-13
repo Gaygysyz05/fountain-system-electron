@@ -66,6 +66,7 @@ class ZoneScenarioPlayer:
         self.watchdog_timeout = DEFAULT_WATCHDOG_TIMEOUT
 
         self._last_device_states: dict[str, object] = {}
+        self._seeking = False  # true while a seek's audio reposition is in flight -- see seek()/_loop()
         self._task: Optional[asyncio.Task] = None
         # Runs _check_watchdog on a fixed cadence independent of playback
         # state -- see mark_device_active. None until the first device
@@ -102,6 +103,7 @@ class ZoneScenarioPlayer:
             self._sync_processed_events()
         else:
             self.reset()
+            self.is_paused = False  # a pause from the OLD scenario must not survive into this one (see play()'s is_paused branch)
 
     def reset(self) -> None:
         self.current_position = 0.0
@@ -233,7 +235,16 @@ class ZoneScenarioPlayer:
         self.current_position = max(0.0, min(position, self.project.duration))
         self._sync_processed_events()
         if self._loaded_music_file:
-            await self.audio.seek(self.current_position)
+            # _loop() freezes current_position while _seeking is true (see its
+            # guard below) so the tick clock can't run ahead of audio.seek()'s
+            # own latency (SDL set_pos() isn't instant) -- without this the two
+            # clocks drift apart by however long the reposition actually took.
+            self._seeking = True
+            try:
+                await self.audio.seek(self.current_position)
+            finally:
+                self._seeking = False
+                self._last_tick_time = time.monotonic()
         # The tick loop is the only other thing that ever calls
         # _publish_status(), and only while actually ticking (is_playing) --
         # a seek while paused/stopped otherwise updates current_position with
@@ -247,7 +258,7 @@ class ZoneScenarioPlayer:
             while True:
                 loop_start = time.monotonic()
 
-                if not self.is_playing or self.is_paused:
+                if not self.is_playing or self.is_paused or self._seeking:
                     await asyncio.sleep(0.1)
                     continue
 

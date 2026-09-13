@@ -151,6 +151,64 @@ async def test_non_looping_playback_stops_at_duration() -> None:
     assert player.current_position == project.duration
 
 
+async def test_switching_to_a_different_scenario_while_paused_loads_its_own_audio() -> None:
+    """pause() sets is_paused=True but never touches _loaded_music_file;
+    load_project() for a genuinely different scenario used to leave
+    is_paused untouched too. Pressing Play after switching scenarios
+    while paused would then just resume() the OLD track instead of
+    loading the new scenario's music, even though the hardware schedule
+    had already been reset to the new scenario's events from 0."""
+    player, _ = _make_player()
+    fake_audio = FakeAudioPlayer()
+    player.audio = fake_audio  # type: ignore[assignment]
+
+    project_a = Project(duration=10.0, events=[], music_file="a.mp3")
+    player.load_project(project_a, "A")
+    await player.play()
+    await player.pause()
+    assert player.is_paused is True
+
+    project_b = Project(duration=20.0, events=[], music_file="b.mp3")
+    player.load_project(project_b, "B")  # different scenario while still paused
+
+    assert player.is_paused is False  # must not carry the old pause into the new show
+
+    await player.play()
+
+    assert fake_audio.loaded_file == "b.mp3"  # loaded B's track, not resumed A's
+
+    await player.stop()
+
+
+async def test_seek_while_playing_does_not_let_the_clock_run_ahead_of_a_slow_audio_seek() -> None:
+    """seek() writes current_position synchronously and only then awaits
+    audio.seek() -- itself potentially slow (SDL set_pos()). Without
+    freezing the tick clock for that window, _loop() keeps adding real
+    elapsed time on top of the just-set position while the audio
+    reposition is still in flight, permanently offsetting the hardware
+    schedule from the actual track position by however long that took."""
+    player, _ = _make_player()
+    fake_audio = FakeAudioPlayer()
+    real_seek = fake_audio.seek
+
+    async def slow_seek(position: float) -> None:
+        await asyncio.sleep(0.3)
+        await real_seek(position)
+
+    fake_audio.seek = slow_seek  # type: ignore[method-assign]
+    player.audio = fake_audio  # type: ignore[assignment]
+
+    project = Project(duration=10.0, events=[], music_file="show.mp3")
+    player.load_project(project, "s1")
+    await player.play()
+
+    await player.seek(4.9)
+
+    assert player.current_position == 4.9  # not advanced by the 0.3s the reposition itself took
+
+    await player.stop()
+
+
 async def test_watchdog_fires_independent_of_playback_state() -> None:
     """The tick loop's own _check_watchdog call only runs while _loop is
     actually ticking through its "playing" branch. A device marked active
