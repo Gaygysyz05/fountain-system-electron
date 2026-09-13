@@ -54,18 +54,18 @@ export function summarizeState(category: DeviceType, parameters: Record<string, 
 }
 
 // -- valve pattern generators ---------------------------------------------
-//
-// Only "constant" (bulk on/off) and "alternate" (flip-every-step flash) are implemented; component_tables.py's Wave/Cascade patterns were not carried over.
 
-export type ValvePatternType = "constant" | "alternate";
+export type ValvePatternType = "constant" | "alternate" | "wave" | "cascade" | "pingpong" | "random";
 
 export interface ValvePatternOptions {
-  deviceIds: string[]; // order matters for "alternate"
+  deviceIds: string[]; // order matters for every pattern except "constant"
   startTime: number;
   endTime: number;
   stepInterval: number;
   pattern: ValvePatternType;
   constantOn?: boolean; // for "constant"
+  trailLength?: number; // for "cascade" -- how many consecutive valves stay lit at once
+  density?: number; // for "random" -- 0-100, chance each valve is on at a given step
   field?: string; // parameter key to toggle -- "on" for valves, "active" for motors
 }
 
@@ -73,8 +73,17 @@ function roundTime(t: number): number {
   return Math.round(t * 10) / 10;
 }
 
+/** Bounces 0..n-1..0..n-1... instead of wrapping (period 2*(n-1) for n>1) -- the index sequence "pingpong" moves through. */
+function pingpongPosition(step: number, n: number): number {
+  if (n <= 1) return 0;
+  const period = 2 * (n - 1);
+  const pos = step % period;
+  return pos < n ? pos : period - pos;
+}
+
 export function generateValvePattern(opts: ValvePatternOptions): Array<{ time: number; device_id: string; on: boolean }> {
   const out: Array<{ time: number; device_id: string; on: boolean }> = [];
+  const n = opts.deviceIds.length;
 
   if (opts.pattern === "constant") {
     const on = opts.constantOn ?? true;
@@ -82,13 +91,42 @@ export function generateValvePattern(opts: ValvePatternOptions): Array<{ time: n
     return out;
   }
 
-  // Flips which half of deviceIds is on each step, producing a checkerboard flash across the selection.
   const step = Math.max(0.1, opts.stepInterval);
+  const trailLength = Math.max(1, opts.trailLength ?? 3);
+  const densityChance = Math.min(1, Math.max(0, (opts.density ?? 50) / 100));
+
   let stepIndex = 0;
   for (let t = opts.startTime; t <= opts.endTime + 1e-9; t += step, stepIndex++) {
     const time = roundTime(t);
     opts.deviceIds.forEach((id, index) => {
-      out.push({ time, device_id: id, on: (index + stepIndex) % 2 === 0 });
+      let on: boolean;
+      switch (opts.pattern) {
+        case "alternate":
+          // Flips which half of the selection is on each step, producing a checkerboard flash.
+          on = (index + stepIndex) % 2 === 0;
+          break;
+        case "wave":
+          // Exactly one valve lit at a time, moving down the line and wrapping -- a running chase.
+          on = index === stepIndex % n;
+          break;
+        case "cascade": {
+          // Like wave, but a window of `trailLength` consecutive valves stays lit, overlapping into a flowing wave instead of a single point.
+          const distanceBehindHead = (index - (stepIndex % n) + n) % n;
+          on = distanceBehindHead < trailLength;
+          break;
+        }
+        case "pingpong":
+          // Same single-valve chase as wave, but bounces back at each end instead of wrapping around.
+          on = index === pingpongPosition(stepIndex, n);
+          break;
+        case "random":
+          // Each valve independently rolls the dice every step -- baked into fixed events now, not re-randomized at playback.
+          on = Math.random() < densityChance;
+          break;
+        default:
+          on = false;
+      }
+      out.push({ time, device_id: id, on });
     });
   }
   return out;

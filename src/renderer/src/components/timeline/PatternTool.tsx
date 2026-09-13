@@ -6,14 +6,7 @@ import type { ValvePatternType } from "../../lib/scenario";
 const inputClass = INPUT_CLASS;
 const buttonClass = "h-control rounded-control border border-border bg-bg-surface3 px-sm text-xs text-text-primary hover:bg-bg-surface2";
 
-/**
- * Bulk / animated valve editing -- directly answers "open only even valves,
- * close odd" (select the channels, "Set constant", Apply) and "make some
- * kind of animation" (Alternate) without hand-placing one grid cell per
- * channel per moment. This is the alternating pattern feature the
- * original codebase had (component_tables.py) that the very first audit
- * flagged as worth keeping but this project never built until now.
- */
+/** Bulk / animated valve editing -- select channels and apply a pattern (constant, flash, chase, cascade, ping-pong, random) across a time range instead of hand-placing one grid cell per channel per moment. */
 export function PatternTool({
   devices,
   duration,
@@ -31,6 +24,8 @@ export function PatternTool({
   const [stepInterval, setStepInterval] = useState(1);
   const [pattern, setPattern] = useState<ValvePatternType>("constant");
   const [constantOn, setConstantOn] = useState(true);
+  const [trailLength, setTrailLength] = useState(3);
+  const [density, setDensity] = useState(50);
 
   function toggle(id: string): void {
     setSelected((prev) => {
@@ -54,6 +49,8 @@ export function PatternTool({
       stepInterval,
       pattern,
       constantOn,
+      trailLength,
+      density,
     });
     onClose();
   }
@@ -97,6 +94,10 @@ export function PatternTool({
           <select value={pattern} onChange={(e) => setPattern(e.target.value as ValvePatternType)} className={inputClass}>
             <option value="constant">Set constant</option>
             <option value="alternate">Alternate (flash)</option>
+            <option value="wave">Wave (running chase)</option>
+            <option value="cascade">Cascade (overlapping wave)</option>
+            <option value="pingpong">Ping-pong (bounce)</option>
+            <option value="random">Random flicker</option>
           </select>
         </label>
 
@@ -107,10 +108,24 @@ export function PatternTool({
           </label>
         )}
 
-        {pattern === "alternate" && (
+        {pattern !== "constant" && (
           <label className="flex flex-col gap-1 text-xs">
             <span className="text-text-secondary">Step (s)</span>
             <input type="number" min={0.1} step={0.1} value={stepInterval} onChange={(e) => setStepInterval(parseFloat(e.target.value) || 1)} className={`${inputClass} w-20`} />
+          </label>
+        )}
+
+        {pattern === "cascade" && (
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-text-secondary">Trail length</span>
+            <input type="number" min={1} step={1} value={trailLength} onChange={(e) => setTrailLength(parseInt(e.target.value, 10) || 1)} className={`${inputClass} w-20`} />
+          </label>
+        )}
+
+        {pattern === "random" && (
+          <label className="flex flex-col gap-1 text-xs">
+            <span className="text-text-secondary">Density (%)</span>
+            <input type="number" min={0} max={100} step={5} value={density} onChange={(e) => setDensity(parseInt(e.target.value, 10) || 0)} className={`${inputClass} w-20`} />
           </label>
         )}
 
