@@ -30,8 +30,8 @@ def _isolated_data_dir(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(persistence, "SCHEDULE_FILE", data_dir / "schedule.json")
 
 
-def _scenario(name: str, duration: float = 10.0) -> ScenarioFileDto:
-    return ScenarioFileDto(name=name, duration=duration, events=[], music_file=None, device_ids=[])
+def _scenario(name: str, duration: float = 10.0, zone_id: int | None = None) -> ScenarioFileDto:
+    return ScenarioFileDto(name=name, duration=duration, events=[], music_file=None, device_ids=[], zone_id=zone_id)
 
 
 async def test_save_scenario_backs_up_previous_version_before_overwriting() -> None:
@@ -46,6 +46,25 @@ async def test_save_scenario_backs_up_previous_version_before_overwriting() -> N
 
     current = await persistence.read_scenario_raw("show1")
     assert current["name"] == "v2"
+
+
+async def test_scenario_zone_id_round_trips_through_save_and_read_raw() -> None:
+    """zone_id records which zone a scenario was authored for (see ScenarioFileDto's docstring) -- must survive the same save/read path as every other field, including the None default for scenarios saved before this field existed."""
+    await persistence.save_scenario("show1", _scenario("v1", zone_id=2))
+    assert (await persistence.read_scenario_raw("show1"))["zone_id"] == 2
+
+    await persistence.save_scenario("show2", _scenario("v1", zone_id=None))
+    assert (await persistence.read_scenario_raw("show2"))["zone_id"] is None
+
+
+async def test_list_scenarios_reports_zone_id() -> None:
+    """GET /scenarios (list_scenarios) must surface zone_id too, not just the full per-scenario read -- the scenario manager needs it to warn about/filter by zone without a round-trip per row."""
+    await persistence.save_scenario("show1", _scenario("v1", zone_id=3))
+
+    listed = await persistence.list_scenarios()
+
+    assert len(listed) == 1
+    assert listed[0]["zone_id"] == 3
 
 
 async def test_first_save_creates_no_backup() -> None:

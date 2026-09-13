@@ -7,9 +7,11 @@ monkeypatches the `datetime` name main.py imported for deterministic
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 
 import pytest
+from fastapi import HTTPException
 
 from app import main as app_main
 from app import persistence
@@ -169,3 +171,71 @@ async def test_entry_for_a_missing_scenario_is_marked_fired_and_logged(monkeypat
     audit = await persistence.read_audit_log()
     assert audit[0]["command"] == "SCHEDULED_PLAY"
     assert audit[0]["ok"] is False
+
+
+async def test_put_schedule_rejects_an_explicit_null_for_a_required_field() -> None:
+    """entry.model_copy(update=...) used to skip validation entirely -- an explicit null for a
+    required field ({"zone_id": null}, which a JS/TS client can send for "no change" just as easily
+    as omitting the key) silently produced a type-invalid ScheduleEntryDto that got written straight
+    to schedule.json, where it broke every subsequent read (_load_schedule_sync used to validate the
+    whole list in one comprehension, with no per-entry isolation) until someone hand-edited the file."""
+    await persistence.save_schedule([
+        persistence.ScheduleEntryDto(id="e1", zone_id=1, scenario_id="show1", time="20:00", days=[], enabled=True),
+    ])
+    # zone_id=None here is EXPLICIT (passed as a kwarg), matching how Pydantic tracks a client's
+    # literal {"zone_id": null} in a request body -- not the same as omitting the field entirely.
+    payload = persistence.ScheduleEntryUpdateDto(zone_id=None)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await app_main.update_schedule_entry("e1", payload)
+    assert exc_info.value.status_code == 422
+
+    # The rejected update must never have been written -- schedule.json stays exactly as it was.
+    saved = await persistence.load_schedule()
+    assert saved[0].zone_id == 1
+
+
+async def test_schedule_transaction_serializes_concurrent_read_modify_write() -> None:
+    """Two overlapping load-mutate-save cycles (e.g. _check_schedule mid-await racing an operator's
+    PUT/DELETE) used to have nothing serializing them -- whichever finished its save LAST won
+    outright, silently reverting the other's change. schedule_transaction() must make the second
+    caller reload AFTER the first's save, not race it, so both edits survive."""
+    await persistence.save_schedule([
+        persistence.ScheduleEntryDto(id="e1", zone_id=1, scenario_id="show1", time="20:00", days=[], enabled=True),
+        persistence.ScheduleEntryDto(id="e2", zone_id=1, scenario_id="show2", time="21:00", days=[], enabled=True),
+    ])
+
+    async def disable_e1() -> None:
+        async with persistence.schedule_transaction() as (entries, save):
+            await asyncio.sleep(0.05)  # widens the race window so both callers are definitely overlapping
+            for e in entries:
+                if e.id == "e1":
+                    e.enabled = False
+            await save(entries)
+
+    async def delete_e2() -> None:
+        async with persistence.schedule_transaction() as (entries, save):
+            await asyncio.sleep(0.05)
+            await save([e for e in entries if e.id != "e2"])
+
+    await asyncio.gather(disable_e1(), delete_e2())
+
+    final = await persistence.load_schedule()
+    assert [e.id for e in final] == ["e1"]  # e2's deletion survived
+    assert final[0].enabled is False  # ...and so did e1's edit -- neither reverted the other
+
+
+async def test_load_schedule_skips_a_corrupt_entry_instead_of_failing_the_whole_list() -> None:
+    """One invalid entry (a hand-edit, or a leftover from before the PUT-validation gap above was
+    closed) used to blow up _load_schedule_sync's single list comprehension, taking down every OTHER
+    zone's schedule too -- GET /schedule, every POST/PUT/DELETE, and the 20s _check_schedule poll all
+    start with a load."""
+    persistence.SCHEDULE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    persistence.SCHEDULE_FILE.write_text(json.dumps([
+        {"id": "e1", "zone_id": 1, "scenario_id": "show1", "time": "20:00", "days": [], "enabled": True, "last_fired_date": None},
+        {"id": "e2", "zone_id": None, "scenario_id": "show2", "time": "21:00", "days": [], "enabled": True, "last_fired_date": None},
+    ]), encoding="utf-8")
+
+    entries = await persistence.load_schedule()
+
+    assert [e.id for e in entries] == ["e1"]

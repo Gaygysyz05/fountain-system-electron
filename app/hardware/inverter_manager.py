@@ -40,10 +40,20 @@ class AsyncInverterManager:
 
         self._client = AsyncModbusTcpClient(host=host, port=port, timeout=2.0)
         self._bus_lock = asyncio.Lock()  # shared by every controller below -- see module docstring
+        # Guards self._client.connect() specifically: pymodbus's connect() has no re-entrancy guard
+        # (each call unconditionally opens a new socket and connection_made() unconditionally
+        # overwrites self.transport), so connect_all()'s gather racing _reconnect_watchdog while the
+        # link is down could otherwise open two real TCP connections on the same client object and
+        # leak one silently. A dedicated lock rather than reusing _bus_lock, which is scoped to wire
+        # transactions, not connection setup.
+        self._connect_lock = asyncio.Lock()
 
         self.inverters: dict[int, AsyncInverterController] = {}
         self._queues: dict[int, asyncio.Queue[_CommandType]] = {}
         self._consumer_tasks: dict[int, asyncio.Task] = {}
+        # execute_motor_event_immediate() runs its ramp on a tracked task (not just awaited inline)
+        # purely so emergency_stop_all() can cancel it -- see both methods' docstrings.
+        self._immediate_tasks: dict[int, asyncio.Task] = {}
         self._poll_task: asyncio.Task | None = None
         self._reconnect_task: asyncio.Task | None = None
         self._closing = False
@@ -70,10 +80,12 @@ class AsyncInverterManager:
             return False
 
         if not self._client.connected:
-            try:
-                await self._client.connect()
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("zone %s: shared link %s:%s connect failed: %s", self.zone_id, self.host, self.port, exc)
+            async with self._connect_lock:
+                if not self._client.connected:  # re-check: another caller may have connected while we waited for the lock
+                    try:
+                        await self._client.connect()
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("zone %s: shared link %s:%s connect failed: %s", self.zone_id, self.host, self.port, exc)
 
         ok = await controller.connect()
 
@@ -124,11 +136,23 @@ class AsyncInverterManager:
         return self._enqueue(slave_id, ("stop", None))
 
     async def execute_motor_event_immediate(self, slave_id: int, event_params: dict) -> bool:
-        """Bypasses the queue and awaits the result directly -- no thread-bridging hack needed since the caller can just await us."""
+        """Bypasses the queue and awaits the result directly -- no thread-bridging hack needed since the caller can
+        just await us. Still run as a tracked task (not just awaited inline), purely so emergency_stop_all() can
+        cancel it -- otherwise a ramp started this way keeps stepping toward its pre-E-stop target for seconds after
+        E-stop returns, the same gap emergency_stop_all() already closes for the queued/_consumer_tasks path but had
+        no way to reach here. A cancellation raised by that surfaces to this call's own caller, same as any other
+        asyncio cancellation -- not swallowed here, since "your motor command was interrupted by an E-stop" is
+        exactly what should reach whoever issued it."""
         controller = self.inverters.get(slave_id)
         if not controller:
             return False
-        return await self._apply_frequency(slave_id, controller, event_params)
+        task = asyncio.create_task(self._apply_frequency(slave_id, controller, event_params))
+        self._immediate_tasks[slave_id] = task
+        try:
+            return await task
+        finally:
+            if self._immediate_tasks.get(slave_id) is task:
+                del self._immediate_tasks[slave_id]
 
     async def reset_fault(self, slave_id: int) -> bool:
         """Bypasses the queue -- a fault reset must not wait behind the stale command that caused the fault in the first place."""
@@ -196,7 +220,7 @@ class AsyncInverterManager:
     # -- bulk stop -------------------------------------------------------------
 
     async def emergency_stop_all(self) -> int:
-        """Bypasses every queue and cancels each motor's consumer task before stopping it, because an in-flight ramp only bails on a NEWER queued command (not an empty queue) and would otherwise keep stepping toward its pre-E-stop target for seconds after this returns; tasks are restarted after so their queues aren't left with no reader."""
+        """Bypasses every queue and cancels each motor's consumer task before stopping it, because an in-flight ramp only bails on a NEWER queued command (not an empty queue) and would otherwise keep stepping toward its pre-E-stop target for seconds after this returns; tasks are restarted after so their queues aren't left with no reader. Also cancels any execute_motor_event_immediate() ramp in flight -- that path runs on its own tracked task (not a _consumer_tasks entry), so without this it would keep ramping right through an E-stop."""
         logger.warning("EMERGENCY stop all motors on %s:%s", self.host, self.port)
         for queue in self._queues.values():
             while not queue.empty():
@@ -204,7 +228,9 @@ class AsyncInverterManager:
 
         for task in self._consumer_tasks.values():
             task.cancel()
-        for task in list(self._consumer_tasks.values()):
+        for task in self._immediate_tasks.values():
+            task.cancel()
+        for task in list(self._consumer_tasks.values()) + list(self._immediate_tasks.values()):
             with contextlib.suppress(asyncio.CancelledError):
                 await task
 
@@ -256,10 +282,14 @@ class AsyncInverterManager:
 
             if not self._client.connected:
                 logger.info("zone %s: reconnecting shared modbus link %s:%s", self.zone_id, self.host, self.port)
-                try:
-                    await self._client.connect()
-                except Exception:  # noqa: BLE001
-                    continue
+                async with self._connect_lock:
+                    # Still down after acquiring the lock? connect_inverter() may have already
+                    # reconnected while this waited -- only attempt if it genuinely didn't.
+                    if not self._client.connected:
+                        try:
+                            await self._client.connect()
+                        except Exception:  # noqa: BLE001
+                            continue
 
             if self._client.connected:
                 for controller in self.inverters.values():

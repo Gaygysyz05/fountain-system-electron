@@ -35,6 +35,11 @@ class ZoneScenarioPlayer:
         self.current_position = 0.0
         self._last_tick_time = 0.0
 
+        # Bumped by stop() and load_project() -- lets an in-flight play() notice that the world changed underneath
+        # its awaits (audio.load/seek/play/resume all yield control) and abort instead of reviving playback on top
+        # of whatever the concurrent call just did. See play()'s recheck below.
+        self._generation = 0
+
         # device_id -> last-refreshed time; mutate only via mark_device_active/inactive, never directly (see _watchdog_task).
         self.active_devices: dict[str, float] = {}
         self.watchdog_timeout = DEFAULT_WATCHDOG_TIMEOUT
@@ -55,6 +60,7 @@ class ZoneScenarioPlayer:
     def load_project(self, project: Project, scenario_id: Optional[str] = None) -> None:
         """PLAY_SCENARIO calls this on every press; resets to 0 only when loading a different scenario, so a SEEK_ZONE set while stopped survives replaying the same one."""
         same_scenario = scenario_id is not None and scenario_id == self.loaded_scenario_id
+        self._generation += 1  # invalidates any play() still awaited from a previous project/scenario -- see play()
         self.project = project
         self.loaded_scenario_id = scenario_id
         self.pending_events = sorted(project.events, key=lambda e: e.time)
@@ -71,19 +77,37 @@ class ZoneScenarioPlayer:
         self.last_processed_event_index = -1
 
     def _sync_processed_events(self) -> None:
-        """Marks pending_events strictly before current_position as already-processed; must use `<`, not `<=`, or an event exactly at current_position (e.g. a fresh t=0 cue) would be marked processed before ever being dispatched."""
+        """Marks pending_events strictly before current_position as already-processed AND dispatches the latest
+        per-device state among them (same "last event per device wins" batching as _process_events()) -- called
+        whenever current_position jumps without ticking through the events in between (seek(), or resuming/loading
+        at a position an earlier seek left set while stopped), so hardware ends up in whatever state the scenario
+        actually dictates for the jumped-to position instead of silently keeping whatever it happened to already be
+        in. Must use `<`, not `<=`, or an event exactly at current_position (e.g. a fresh t=0 cue) would be marked
+        processed before ever being dispatched."""
         self.processed_events.clear()
         self.last_processed_event_index = -1
+        device_batch: dict[str, Event] = {}
         for i, event in enumerate(self.pending_events):
             if event.time < self.current_position:
                 self.processed_events.add(i)
                 self.last_processed_event_index = i
+                device_batch[event.device_id] = event
             else:
                 break
+
+        if not device_batch or not self.on_device_event:
+            return
+        for device_id, event in device_batch.items():
+            try:
+                self.on_device_event(event)
+            except Exception:  # noqa: BLE001 -- same isolation stance as _process_events()
+                logger.exception("zone %s: on_device_event failed for device %s during resync", self.zone_id, device_id)
 
     async def play(self) -> None:
         if not self.project:
             return
+        generation = self._generation
+        resuming_from_pause = self.is_paused
 
         if not self.is_paused:
             # NOT reset() -- that would zero current_position and discard a SEEK_ZONE set while stopped; only resync bookkeeping to current position.
@@ -95,6 +119,26 @@ class ZoneScenarioPlayer:
                 await self.audio.play()
         elif self._loaded_music_file:
             await self.audio.resume()
+
+        # A concurrent stop()/load_project() may have landed while the awaits above were suspended (self._generation
+        # only changes there, never here) -- without this recheck, play() would unconditionally revive is_playing
+        # and spawn a fresh tick task on top of whatever that concurrent call just did, silently undoing an
+        # operator's Stop or handing hardware control to the wrong scenario. Best-effort audio cleanup rather than
+        # leaving a stale audio.play()/resume() running with nothing left tracking it.
+        if self._generation != generation:
+            if self._loaded_music_file:
+                await self.audio.stop()
+                self._loaded_music_file = None
+            return
+
+        if resuming_from_pause:
+            # active_devices timestamps were frozen for the whole pause (mark_device_active/inactive only fire from
+            # real device events, none of which happen while paused) -- without this, resuming after a pause longer
+            # than watchdog_timeout immediately force-stops every device that was legitimately still running when
+            # the operator paused, mistaking "paused" for "stalled".
+            now = time.monotonic()
+            for device_id in self.active_devices:
+                self.active_devices[device_id] = now
 
         self.is_playing = True
         self.is_paused = False
@@ -110,6 +154,7 @@ class ZoneScenarioPlayer:
         self._publish_status("paused")
 
     async def stop(self) -> None:
+        self._generation += 1  # invalidates any play() still awaited when this stop() was issued -- see play()
         self.is_playing = False
         self.is_paused = False
         self._force_stop_active_devices()

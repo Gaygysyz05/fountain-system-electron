@@ -27,7 +27,7 @@ class AsyncValveController:
         total_channels: int,
         bus: EventBus,
         instance_id: str = "",
-        min_toggle_interval: float = 0.25,  # conservative default -- tune to the valve/relay datasheet
+        min_toggle_interval: float = 0.5,  # matches ModbusValveConfig's schema default -- tune to the valve/relay datasheet
         write_timeout: float = 2.0,
     ) -> None:
         self.zone_id = zone_id
@@ -145,11 +145,13 @@ class AsyncValveController:
                     self._last_known_states.pop(valve_num, None)
 
     async def _respect_min_interval(self, valve_num: int) -> None:
+        """Only WAITS -- recording when a relay was actually toggled is _write_relay's job (see its own
+        comment), so every caller's bookkeeping stays accurate, including emergency_all_off()'s direct
+        calls that skip this wait entirely."""
         last = self._last_command_time.get(valve_num, 0.0)
         elapsed = time.monotonic() - last
         if elapsed < self.min_toggle_interval:
             await asyncio.sleep(self.min_toggle_interval - elapsed)
-        self._last_command_time[valve_num] = time.monotonic()
 
     async def _write_relay(self, relay_num: int, state: bool) -> bool:
         if not 1 <= relay_num <= self.total_channels:
@@ -178,6 +180,13 @@ class AsyncValveController:
         if result.isError():
             self._publish_error(f"relay {relay_num} rejected by controller: {result}")
             return False
+
+        # Records the toggle regardless of which caller made it -- including emergency_all_off()'s
+        # direct calls, which skip _respect_min_interval's wait but must still leave accurate
+        # bookkeeping, or the next legitimate command after an E-stop clears would compute its own
+        # wait against a stale pre-E-stop timestamp and could re-toggle the same relay sooner than
+        # min_toggle_interval after the E-stop's own (otherwise unrecorded) toggle.
+        self._last_command_time[relay_num] = time.monotonic()
         return True
 
     async def _reconnect_watchdog(self) -> None:

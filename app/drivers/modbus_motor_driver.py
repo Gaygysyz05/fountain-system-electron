@@ -13,7 +13,14 @@ from app.hardware.inverter_manager import DEFAULT_MAX_RAMP_RATE_HZ_PER_SEC, Asyn
 class ModbusMotorGatewayConfig(BaseModel):
     host: str
     port: int = 502
-    max_ramp_rate_hz_per_sec: float = Field(DEFAULT_MAX_RAMP_RATE_HZ_PER_SEC, gt=0)
+    # Upper-bounded, not just gt=0: AsyncInverterManager._apply_frequency computes
+    # step = max(0.01, max_rate) * RAMP_STEP_INTERVAL(0.15s), and once that step alone exceeds the
+    # target frequency the ramp's `while abs(target-current) > step` loop never runs even once --
+    # collapsing straight to an instantaneous jump and defeating the ramp-rate limiter entirely. 50
+    # Hz/sec already means 0-50Hz in about a second, generous well above the 5.0 default for any
+    # real pump; tune down further per plumbing inertia, not up past this without also reconsidering
+    # RAMP_STEP_INTERVAL.
+    max_ramp_rate_hz_per_sec: float = Field(DEFAULT_MAX_RAMP_RATE_HZ_PER_SEC, gt=0, le=50.0)
 
 
 class ModbusMotorGatewayDriver:

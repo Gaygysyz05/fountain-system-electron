@@ -150,6 +150,36 @@ async def test_emergency_all_off_cancels_in_flight_command_consumer() -> None:
         await controller.disconnect()
 
 
+async def test_emergency_all_off_records_toggle_time_for_next_command_to_respect() -> None:
+    """emergency_all_off()'s own writes bypass _respect_min_interval's wait (an E-stop must act
+    immediately), but must still RECORD when each relay was toggled -- otherwise the next legitimate
+    command issued right after computes its wait against a stale pre-E-stop timestamp and could
+    re-toggle the same relay sooner than min_toggle_interval after the E-stop's own (unrecorded)
+    toggle."""
+    async with FakeModbusServer() as server:
+        bus = EventBus()
+        controller = await make_controller(server, bus, total_channels=1)
+        controller.min_toggle_interval = 0.5
+
+        controller.set_valve_state(1, True)
+        await asyncio.sleep(0.05)  # let the consumer actually turn it on, stamping _last_command_time
+
+        stale_timestamp = controller._last_command_time[1]
+
+        await controller.emergency_all_off()  # turns relay 1 off; must NOT wait, but must re-stamp
+
+        assert controller._last_command_time[1] > stale_timestamp, (
+            "emergency_all_off()'s own toggle left the relay's bookkeeping pointing at the earlier, "
+            "pre-E-stop command instead of the E-stop's own (later) toggle"
+        )
+        assert controller._last_command_time[1] - stale_timestamp < controller.min_toggle_interval, (
+            "sanity check: the E-stop's own write really did happen well within min_toggle_interval "
+            "of the earlier command, which is exactly the case this bug mattered for"
+        )
+
+        await controller.disconnect()
+
+
 def _drain(queue: asyncio.Queue) -> list:
     items = []
     while not queue.empty():

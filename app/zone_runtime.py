@@ -10,6 +10,16 @@ from app.zones.scenario_player import ZoneScenarioPlayer
 
 logger = logging.getLogger("fountain.zone_runtime")
 
+# "Off" shape per category for ZoneRuntime.stop() -- valve/light state is level-triggered (see
+# _dispatch_device_state's docstring), so unlike a motor there's no watchdog to eventually notice one was left
+# open/lit and force it shut; a plain Stop has to say so explicitly, the same way it already does for motors via
+# ZoneScenarioPlayer's active_devices tracking.
+_OFF_PARAMETERS: dict[DeviceCategory, dict] = {
+    DeviceCategory.VALVE: {"on": False},
+    DeviceCategory.LIGHT: {"r": 0, "g": 0, "b": 0},
+    DeviceCategory.MOTOR: {"active": False, "on": False},
+}
+
 
 class ZoneRuntime:
     def __init__(self, zone_id: int, bus: EventBus) -> None:
@@ -161,6 +171,18 @@ class ZoneRuntime:
         self.device_categories.clear()
         self.device_nozzle_info.clear()
         self.device_last_parameters.clear()
+
+    async def stop(self) -> None:
+        """STOP_ZONE: a graceful, scenario-scoped stop, unlike emergency_stop() which hits every channel on every
+        instance regardless of what the scenario touched. player.stop() already force-stops motors it was tracking
+        for the watchdog; this covers valve/light categories player.stop() has no way to know about, closing/
+        darkening only devices this zone's own bookkeeping (device_last_parameters) shows as not already off --
+        skip_if_unchanged means an idle valve elsewhere in the zone doesn't take an unnecessary hardware write."""
+        await self.player.stop()
+        for device_id, category in list(self.device_categories.items()):
+            off = _OFF_PARAMETERS.get(category)
+            if off is not None:
+                self._dispatch_device_state(device_id, off, skip_if_unchanged=True)
 
     async def emergency_stop(self) -> None:
         """Must never raise (called from the command handler's error path too). Stops the player before any hardware so a still-ticking scenario can't re-arm a device within the same tick, and clears device_last_parameters so a post-stop slider move can't silently re-dispatch stale pre-stop values."""

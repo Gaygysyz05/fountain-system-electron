@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -9,9 +10,9 @@ import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import AsyncIterator, Callable, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from app.drivers.base import DriverInstance
 from app.zone_runtime import ZoneRuntime
@@ -53,12 +54,13 @@ class ScenarioEventDto(BaseModel):
 
 
 class ScenarioFileDto(BaseModel):
-    """POST /scenarios/{scenario_id} body: `events` is what PLAY_SCENARIO/load_scenario actually reads; `device_ids` is opaque editor-only state (which zone devices to show) the daemon just stores and round-trips."""
+    """POST /scenarios/{scenario_id} body: `events` is what PLAY_SCENARIO/load_scenario actually reads; `device_ids` is opaque editor-only state (which zone devices to show) the daemon just stores and round-trips. `zone_id` is the same -- recorded so the HMI can tell which zone a scenario was authored for (and warn/export accordingly) -- playback itself doesn't need it, since PLAY_SCENARIO already runs within a specific zone's own player."""
     name: str
     duration: float
     events: list[ScenarioEventDto]
     music_file: Optional[str] = None
     device_ids: list[str] = []
+    zone_id: Optional[int] = None
 
 
 async def save_installation(zones: dict[int, ZoneRuntime]) -> None:
@@ -148,6 +150,7 @@ def _list_scenarios_sync() -> list[dict]:
             "scenario_id": path.stem,
             "name": data.get("name", path.stem),
             "duration": data.get("duration", 0.0),
+            "zone_id": data.get("zone_id"),
         })
     return scenarios
 
@@ -162,7 +165,12 @@ def _backup_and_write_scenario(path: Path, scenario_id: str, content: str) -> No
     if path.exists():
         backups_dir = SCENARIO_BACKUPS_DIR / scenario_id
         backups_dir.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now().strftime("%Y%m%dT%H%M%S")
+        # Microsecond resolution, not just whole seconds -- two saves of the same scenario landing in
+        # the same second (an autosave immediately followed by a manual Save, or the new Import
+        # feature's GET-then-POST round trip) used to compute the identical stamp and silently
+        # overwrite one backup with the other, losing whichever revision the mechanism existed to
+        # protect.
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
         shutil.copy2(path, backups_dir / f"{stamp}.json")
         stale = sorted(backups_dir.glob("*.json"))[:-MAX_BACKUPS_PER_SCENARIO]
         for old in stale:
@@ -324,7 +332,17 @@ def _load_schedule_sync() -> list[ScheduleEntryDto]:
     except (json.JSONDecodeError, OSError) as exc:
         logger.error("failed to read %s: %s -- starting with no schedule", SCHEDULE_FILE, exc)
         return []
-    return [ScheduleEntryDto.model_validate(e) for e in payload]
+
+    entries: list[ScheduleEntryDto] = []
+    for raw in payload:
+        try:
+            entries.append(ScheduleEntryDto.model_validate(raw))
+        except ValidationError as exc:
+            # One corrupt entry (a hand-edit, or an old file from before schedule_transaction()'s
+            # PUT-merge validation gap was closed) must not take down every OTHER zone's schedule
+            # too -- this used to be a single list comprehension with no per-entry isolation.
+            logger.error("skipping invalid schedule entry %r: %s", raw.get("id", "?") if isinstance(raw, dict) else "?", exc)
+    return entries
 
 
 async def load_schedule() -> list[ScheduleEntryDto]:
@@ -332,7 +350,40 @@ async def load_schedule() -> list[ScheduleEntryDto]:
     return await asyncio.get_running_loop().run_in_executor(None, _load_schedule_sync)
 
 
-async def save_schedule(entries: list[ScheduleEntryDto]) -> None:
+async def _write_schedule_file(entries: list[ScheduleEntryDto]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     content = json.dumps([e.model_dump() for e in entries], indent=2)
     await asyncio.get_running_loop().run_in_executor(None, _write_text_atomic, SCHEDULE_FILE, content)
+
+
+# Guards the WHOLE read-modify-write cycle for schedule.json, not just the write -- _check_schedule
+# (the 20s background poll) and every /schedule REST handler (POST/PUT/DELETE) used to each do their
+# own independent load() -> mutate -> save() with nothing serializing them. Two overlapping enough to
+# interleave (a schedule check mid-way through awaiting zone.player.play() while an operator edits or
+# deletes an entry) meant whichever finished its save LAST won outright, silently reverting the
+# other's change -- including resurrecting an entry the operator had just deleted. See
+# schedule_transaction() below, which every one of those call sites now goes through instead of
+# calling load_schedule()/save_schedule() directly.
+_schedule_lock = asyncio.Lock()
+
+
+async def save_schedule(entries: list[ScheduleEntryDto]) -> None:
+    """Standalone save under the same lock as schedule_transaction() -- only safe when the caller
+    already atomically owns the full up-to-date list (nothing else could have written schedule.json
+    since it was loaded); every /schedule REST handler and _check_schedule should use
+    schedule_transaction() instead, which guarantees that."""
+    async with _schedule_lock:
+        await _write_schedule_file(entries)
+
+
+@contextlib.asynccontextmanager
+async def schedule_transaction() -> AsyncIterator[tuple[list[ScheduleEntryDto], Callable[[list[ScheduleEntryDto]], "asyncio.Future[None]"]]]:
+    """Atomic read-modify-write for schedule.json: yields (entries, save) with the lock already held
+    for the whole `async with` block, including whatever the caller awaits in between -- so a
+    concurrent caller can never load a snapshot from before this one's save, mutate it, and save that
+    stale copy back on top. Yielded `save` writes WITHOUT re-acquiring the lock (save_schedule()
+    itself would deadlock here, since asyncio.Lock isn't reentrant); calling it is optional -- a
+    caller that decides nothing actually changed just doesn't."""
+    async with _schedule_lock:
+        entries = await asyncio.get_running_loop().run_in_executor(None, _load_schedule_sync)
+        yield entries, _write_schedule_file

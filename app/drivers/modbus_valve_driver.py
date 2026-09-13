@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.drivers.base import DeviceCategory, DriverDescriptor, register_driver
 from app.event_bus import EventBus
@@ -17,7 +17,25 @@ class ModbusValveConfig(BaseModel):
     port: int = 502
     slave_id: int = Field(1, ge=1, le=247)
     total_channels: int = Field(32, ge=1, le=256)
-    min_toggle_interval: float = Field(0.25, ge=0, description="Tune to the valve/relay datasheet")
+    min_toggle_interval: float = Field(0.5, ge=0, description="Shortest time a relay can be held open/closed before flipping again -- tune to the valve/relay datasheet; also the floor the HMI's grid Step and timeline snapping enforce")
+
+    @model_validator(mode="after")
+    def _validate_slave_id_range(self) -> "ModbusValveConfig":
+        """AsyncValveController spans multiple Modbus unit IDs once total_channels > 32 (each board
+        addresses only 32 relays): target_slave = slave_id + (relay_num-1)//32, reaching slave_id +
+        (total_channels-1)//32 for the last relay. slave_id and total_channels each validate fine on
+        their own (1-247, 1-256) but a combination of the two can still push that computed unit ID past
+        247 -- worth catching here rather than at runtime, since a write to an invalid unit ID times out
+        and flips _connected, which then makes emergency_all_off() skip every OTHER (correctly
+        addressed) relay in the same pass too."""
+        max_slave = self.slave_id + (self.total_channels - 1) // 32
+        if max_slave > 247:
+            raise ValueError(
+                f"slave_id={self.slave_id} with total_channels={self.total_channels} would address "
+                f"unit ID {max_slave} for the last relay, past the legal maximum of 247 -- reduce "
+                f"slave_id or total_channels"
+            )
+        return self
 
 
 class ModbusValveDriver:

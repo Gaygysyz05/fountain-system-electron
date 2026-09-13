@@ -32,10 +32,18 @@ async def test_seek_while_stopped_is_not_discarded_by_play() -> None:
 
     await player.play()
     await asyncio.sleep(0.05)
-    await player.stop()
 
-    # The t=1.0 event is BEFORE the seek target -- must not fire.
-    assert not any(e.time == 1.0 for e in received)
+    # play() must not have reset() the seeked position back to 0 -- checked BEFORE stop(), which
+    # itself resets current_position as part of its own (correct) teardown.
+    assert player.current_position > 3.9
+    # t=5.0 is still well ahead of where a brief 0.05s tick from ~4.0 could reach -- must not fire yet.
+    # (t=1.0's "on" DOES fire, exactly once, as part of seek()'s own catch-up dispatch -- see
+    # test_seek_forward_dispatches_the_latest_skipped_cue_per_device -- since "on" is genuinely the
+    # correct state for D1 at the seeked-to position 4.0, unlike the old buggy behavior this test
+    # used to assert on, which silently skipped that catch-up entirely.)
+    assert not any(e.time == 5.0 for e in received)
+
+    await player.stop()
 
 
 async def test_reloading_the_same_scenario_keeps_position() -> None:
@@ -226,6 +234,87 @@ async def test_watchdog_fires_independent_of_playback_state() -> None:
     assert force_stops, "a device marked active while idle was never watchdog-checked"
     assert "D1" not in player.active_devices
 
+    await player.aclose()
+
+
+async def test_play_does_not_revive_after_a_concurrent_stop_lands_mid_await() -> None:
+    """A Stop landing while play() is suspended on one of its own awaits
+    (audio.load/seek/play) used to have no effect on play()'s eventual
+    outcome: it unconditionally set is_playing=True and spawned a fresh
+    tick task once its await resolved, silently reviving playback (and
+    hardware output) right after the operator's Stop."""
+    player, _ = _make_player()
+    fake_audio = FakeAudioPlayer()
+
+    # Simulates the exact race: by the time AudioPlayer.play()'s (awaited)
+    # call would resolve, a concurrent stop() has already run and bumped
+    # the generation counter (which stop() does synchronously, before any
+    # of its own awaits -- see scenario_player.py's stop()).
+    real_play = fake_audio.play
+
+    async def play_and_race_a_concurrent_stop() -> None:
+        player._generation += 1
+        await real_play()
+
+    fake_audio.play = play_and_race_a_concurrent_stop  # type: ignore[method-assign]
+    player.audio = fake_audio  # type: ignore[assignment]
+
+    project = Project(duration=10.0, events=[], music_file="show.mp3")
+    player.load_project(project, "s1")
+
+    await player.play()
+
+    assert player.is_playing is False  # the race must not be allowed to revive playback
+    assert player._task is None  # no tick task spawned on top of the concurrent stop
+    assert fake_audio.stopped is True  # play()'s stale continuation must clean up the audio it just (re)started
+
+
+async def test_seek_forward_dispatches_the_latest_skipped_cue_per_device() -> None:
+    """seek() used to mark every event before the target position as
+    already-processed without ever dispatching them -- a valve opened then
+    closed entirely within the skipped range stayed physically open after
+    the seek, since nothing ever told it to close."""
+    player, received = _make_player()
+    project = Project(duration=20.0, events=[
+        Event(time=2.0, device_id="V1", parameters={"on": True}),
+        Event(time=8.0, device_id="V1", parameters={"on": False}),
+    ])
+    player.load_project(project, "s1")
+
+    await player.seek(15.0)  # jumps past both the open AND the close cue
+
+    close_events = [e for e in received if e.device_id == "V1" and e.parameters == {"on": False}]
+    assert close_events, "seek() skipped the close cue instead of catching the device up to it"
+
+
+async def test_resuming_from_pause_refreshes_watchdog_timestamps() -> None:
+    """A pause longer than watchdog_timeout used to force-stop any device
+    that was legitimately still running the moment playback resumed --
+    active_devices timestamps are only ever refreshed by real device
+    events, none of which fire while paused, so the entire pause duration
+    counted toward staleness."""
+    player, received = _make_player()
+    # Comfortably larger than the paused tick loop's own 0.1s poll granularity (it sleeps in 0.1s
+    # increments while paused, so it can take nearly that long to even notice resume and run its
+    # next check) -- otherwise that scheduling slop alone could trip the watchdog and produce a
+    # false failure unrelated to whether resume actually refreshes the timestamp.
+    player.watchdog_timeout = 0.3
+    project = Project(duration=10.0, events=[])
+    player.load_project(project, "s1")
+    player.mark_device_active("M1")
+
+    await player.play()
+    await player.pause()
+    await asyncio.sleep(0.5)  # much longer than watchdog_timeout -- would trip it if resume doesn't refresh
+    await player.play()  # resume
+
+    await asyncio.sleep(0.15)  # short relative to watchdog_timeout, but enough for the tick loop to notice resume and run its next check
+
+    assert "M1" in player.active_devices  # still tracked, not force-stopped by a stale pre-pause timestamp
+    force_stops = [e for e in received if e.device_id == "M1" and e.parameters == {"active": False, "on": False}]
+    assert not force_stops
+
+    await player.stop()
     await player.aclose()
 
 

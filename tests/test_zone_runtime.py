@@ -90,6 +90,58 @@ async def test_emergency_stop_stops_player_before_hardware() -> None:
     assert len(motor.applied) == applied_count_at_stop
 
 
+async def test_stop_closes_valves_and_lights_the_scenario_left_open() -> None:
+    """A plain Stop (STOP_ZONE, not Emergency Stop) used to only force-stop
+    tracked motors -- a valve opened mid-show with no later cue for that
+    device stayed physically open indefinitely after Stop, since only a
+    full emergency_stop() ever reached valve/light categories."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    valve = FakeDriverInstance(DeviceCategory.VALVE)
+    light = FakeDriverInstance(DeviceCategory.LIGHT)
+    _register_fake_instance(zone, "valves", valve)
+    _register_fake_instance(zone, "lights", light)
+    await zone.add_device("V1", "valves", "1")
+    await zone.add_device("L1", "lights", "1")
+
+    project = Project(duration=10.0, events=[
+        Event(time=0.0, device_id="V1", parameters={"on": True}),
+        Event(time=0.0, device_id="L1", parameters={"r": 255, "g": 200, "b": 120}),
+    ])
+    zone.player.load_project(project, "s1")
+    await zone.player.play()
+    await asyncio.sleep(0.1)  # let the tick loop dispatch both t=0 cues
+
+    assert valve.applied[-1] == ("1", {"on": True})
+    assert light.applied[-1][1].get("r") == 255
+
+    await zone.stop()
+
+    assert valve.applied[-1] == ("1", {"on": False})
+    assert light.applied[-1] == ("1", {"r": 0, "g": 0, "b": 0})
+
+
+async def test_stop_does_not_rewrite_devices_already_off() -> None:
+    """skip_if_unchanged means an idle valve elsewhere in the zone doesn't
+    take an unnecessary hardware write on every Stop -- only devices the
+    scenario actually left on/lit should see a new command."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    valve = FakeDriverInstance(DeviceCategory.VALVE)
+    _register_fake_instance(zone, "valves", valve)
+    await zone.add_device("V1", "valves", "1")
+
+    project = Project(duration=10.0, events=[Event(time=0.0, device_id="V1", parameters={"on": False})])
+    zone.player.load_project(project, "s1")
+    await zone.player.play()
+    await asyncio.sleep(0.1)
+
+    applied_count = len(valve.applied)
+    await zone.stop()
+
+    assert len(valve.applied) == applied_count  # already off -- no redundant write
+
+
 async def test_bad_device_does_not_kill_the_tick_loop_or_watchdog() -> None:
     """The bug this guards: one device raising out of apply_state (e.g. an
     unparseable channel) used to propagate out of the fire-and-forget tick

@@ -41,36 +41,36 @@ _SCHEDULE_CHECK_INTERVAL_S = 20.0
 
 
 async def _check_schedule() -> None:
-    """last_fired_date guards against double-firing within the same matching minute at this poll interval; a missed time (daemon was down) is skipped, not caught up -- see ScheduleEntryDto."""
-    entries = await persistence.load_schedule()
-    now = datetime.now()
-    today = now.strftime("%Y-%m-%d")
-    current_time = now.strftime("%H:%M")
-    weekday = now.weekday()  # 0=Monday .. 6=Sunday, matches ScheduleEntryDto.days
+    """last_fired_date guards against double-firing within the same matching minute at this poll interval; a missed time (daemon was down) is skipped, not caught up -- see ScheduleEntryDto. Runs inside schedule_transaction() so an operator's concurrent POST/PUT/DELETE on /schedule can't load a stale snapshot from before this save and silently revert it (or vice versa) -- see that function's docstring."""
+    async with persistence.schedule_transaction() as (entries, save):
+        now = datetime.now()
+        today = now.strftime("%Y-%m-%d")
+        current_time = now.strftime("%H:%M")
+        weekday = now.weekday()  # 0=Monday .. 6=Sunday, matches ScheduleEntryDto.days
 
-    changed = False
-    for entry in entries:
-        if not entry.enabled or entry.time != current_time or entry.last_fired_date == today:
-            continue
-        if entry.days and weekday not in entry.days:
-            continue
+        changed = False
+        for entry in entries:
+            if not entry.enabled or entry.time != current_time or entry.last_fired_date == today:
+                continue
+            if entry.days and weekday not in entry.days:
+                continue
 
-        entry.last_fired_date = today  # set before the attempt -- a hardware failure must not retry every 20s
-        changed = True
-        try:
-            zone = get_zone(entry.zone_id)
-            project = await persistence.load_scenario(entry.scenario_id)
-            zone.player.load_project(project, entry.scenario_id)
-            await zone.player.play()
-            logger.info("schedule: zone %s playing '%s' (scheduled %s)", entry.zone_id, entry.scenario_id, entry.time)
-            await persistence.append_audit_entry("SCHEDULED_PLAY", entry.zone_id, True, None)
-        except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the rest, or crash this loop
-            logger.exception("scheduled play failed for entry %s (zone %s, scenario '%s')",
-                              entry.id, entry.zone_id, entry.scenario_id)
-            await persistence.append_audit_entry("SCHEDULED_PLAY", entry.zone_id, False, str(exc))
+            entry.last_fired_date = today  # set before the attempt -- a hardware failure must not retry every 20s
+            changed = True
+            try:
+                zone = get_zone(entry.zone_id)
+                project = await persistence.load_scenario(entry.scenario_id)
+                zone.player.load_project(project, entry.scenario_id)
+                await zone.player.play()
+                logger.info("schedule: zone %s playing '%s' (scheduled %s)", entry.zone_id, entry.scenario_id, entry.time)
+                await persistence.append_audit_entry("SCHEDULED_PLAY", entry.zone_id, True, None)
+            except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the rest, or crash this loop
+                logger.exception("scheduled play failed for entry %s (zone %s, scenario '%s')",
+                                  entry.id, entry.zone_id, entry.scenario_id)
+                await persistence.append_audit_entry("SCHEDULED_PLAY", entry.zone_id, False, str(exc))
 
-    if changed:
-        await persistence.save_schedule(entries)
+        if changed:
+            await save(entries)
 
 
 async def _schedule_loop() -> None:
@@ -250,34 +250,38 @@ async def get_schedule() -> list[dict]:
 
 @app.post("/schedule")
 async def create_schedule_entry(payload: persistence.ScheduleEntryCreateDto) -> dict:
-    entries = await persistence.load_schedule()
-    entry = persistence.ScheduleEntryDto(id=str(uuid4()), **payload.model_dump())
-    entries.append(entry)
-    await persistence.save_schedule(entries)
-    return entry.model_dump()
+    async with persistence.schedule_transaction() as (entries, save):
+        entry = persistence.ScheduleEntryDto(id=str(uuid4()), **payload.model_dump())
+        entries.append(entry)
+        await save(entries)
+        return entry.model_dump()
 
 
 @app.put("/schedule/{entry_id}")
 async def update_schedule_entry(entry_id: str, payload: persistence.ScheduleEntryUpdateDto) -> dict:
-    entries = await persistence.load_schedule()
-    for i, entry in enumerate(entries):
-        if entry.id == entry_id:
-            # exclude_unset: a field the client omitted must keep its current value, not reset to the DTO's default (e.g. bool `enabled` defaulting to True would silently re-enable a disabled entry).
-            updated = entry.model_copy(update=payload.model_dump(exclude_unset=True))
-            entries[i] = updated
-            await persistence.save_schedule(entries)
-            return updated.model_dump()
-    raise HTTPException(status_code=404, detail=f"schedule entry '{entry_id}' not found")
+    async with persistence.schedule_transaction() as (entries, save):
+        for i, entry in enumerate(entries):
+            if entry.id == entry_id:
+                # exclude_unset: a field the client omitted must keep its current value, not reset to the DTO's default (e.g. bool `enabled` defaulting to True would silently re-enable a disabled entry).
+                # Re-validated via model_validate (not entry.model_copy(update=...), which skips validation entirely) so an explicit null for a required field -- {"zone_id": null} is "set" as far as exclude_unset is concerned, not omitted -- is rejected here with a 422 instead of writing a type-invalid entry straight to schedule.json, where it used to blow up _load_schedule_sync's per-entry validation on every read/write from then on.
+                try:
+                    updated = persistence.ScheduleEntryDto.model_validate({**entry.model_dump(), **payload.model_dump(exclude_unset=True)})
+                except ValidationError as exc:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                entries[i] = updated
+                await save(entries)
+                return updated.model_dump()
+        raise HTTPException(status_code=404, detail=f"schedule entry '{entry_id}' not found")
 
 
 @app.delete("/schedule/{entry_id}")
 async def delete_schedule_entry(entry_id: str) -> dict:
-    entries = await persistence.load_schedule()
-    remaining = [e for e in entries if e.id != entry_id]
-    if len(remaining) == len(entries):
-        raise HTTPException(status_code=404, detail=f"schedule entry '{entry_id}' not found")
-    await persistence.save_schedule(remaining)
-    return {"status": "ok"}
+    async with persistence.schedule_transaction() as (entries, save):
+        remaining = [e for e in entries if e.id != entry_id]
+        if len(remaining) == len(entries):
+            raise HTTPException(status_code=404, detail=f"schedule entry '{entry_id}' not found")
+        await save(remaining)
+        return {"status": "ok"}
 
 
 @app.get("/audit")
@@ -404,7 +408,7 @@ async def _dispatch(cmd) -> None:  # noqa: ANN001 - discriminated union, see app
 
         case "STOP_ZONE":
             if cmd.zone_id in zones:
-                await zones[cmd.zone_id].player.stop()
+                await zones[cmd.zone_id].stop()  # not player.stop() directly -- see ZoneRuntime.stop()'s docstring
 
         case "PAUSE_ZONE":
             if cmd.zone_id in zones:
