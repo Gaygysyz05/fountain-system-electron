@@ -149,3 +149,40 @@ async def test_non_looping_playback_stops_at_duration() -> None:
 
     assert player.is_playing is False
     assert player.current_position == project.duration
+
+
+async def test_watchdog_fires_independent_of_playback_state() -> None:
+    """The tick loop's own _check_watchdog call only runs while _loop is
+    actually ticking through its "playing" branch. A device marked active
+    while nothing is playing at all -- a manual Devices-tab test-fire, or
+    one still active after a non-looping show reaches its natural end and
+    _loop returns for good -- used to have nothing ever checking it again
+    once the loop stopped. The standalone watchdog task must catch this."""
+    player, received = _make_player()
+    player.watchdog_timeout = 0.05
+
+    player.mark_device_active("D1")
+    await asyncio.sleep(0.8)  # the watchdog loop polls every 0.5s -- give it a full cycle past the timeout
+
+    force_stops = [e for e in received if e.device_id == "D1" and e.parameters == {"active": False, "on": False}]
+    assert force_stops, "a device marked active while idle was never watchdog-checked"
+    assert "D1" not in player.active_devices
+
+    await player.aclose()
+
+
+async def test_stop_force_stops_tracked_devices_instead_of_forgetting_them() -> None:
+    """stop() used to just active_devices.clear() -- that silences the
+    watchdog but does nothing to the device itself, so a motor already
+    spinning at its last commanded frequency kept spinning right after the
+    operator pressed Stop, with its only safety net now gone too."""
+    player, received = _make_player()
+    player.mark_device_active("D1")
+
+    await player.stop()
+
+    force_stops = [e for e in received if e.device_id == "D1" and e.parameters == {"active": False, "on": False}]
+    assert force_stops, "stop() did not force-stop a device it was tracking"
+    assert player.active_devices == {}
+
+    await player.aclose()

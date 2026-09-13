@@ -41,7 +41,7 @@ class ArtNetLightDriver:
         await self._controller.disconnect()
 
     async def emergency_stop(self) -> None:
-        self._controller.all_off()
+        await self._controller.emergency_stop()
 
     def is_connected(self) -> bool:
         return self._controller.is_connected()

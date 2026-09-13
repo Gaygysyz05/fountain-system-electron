@@ -5,6 +5,7 @@ testing against exactly this kind of failure-injecting fake."""
 from __future__ import annotations
 
 import asyncio
+import time
 
 from app.event_bus import EventBus
 from app.hardware.modbus_valve import AsyncValveController
@@ -109,6 +110,42 @@ async def test_reconnect_closes_the_previous_client_instead_of_leaking_it() -> N
 
         assert controller._client is not first_client  # a fresh client was made, as before
         assert first_client.connected is False  # ...but the old one was actually closed, not abandoned
+
+        await controller.disconnect()
+
+
+async def test_emergency_all_off_cancels_in_flight_command_consumer() -> None:
+    """emergency_all_off() bypasses the queue for its OWN writes, but used
+    to leave _command_consumer running underneath. A command that had
+    already been dequeued and was mid-flight -- past _respect_min_interval's
+    sleep, about to write -- when the E-stop fired was never touched by
+    that drain, so it would still land on the wire and turn a valve back on
+    some time after emergency_all_off() had already reported it off.
+
+    Forces exactly that ordering deterministically: seed _last_command_time
+    so the queued command's own min-interval wait is long (~1s), let the
+    consumer actually dequeue it and enter that wait, THEN call
+    emergency_all_off() (which returns almost immediately against the fake
+    local server) and check nothing writes valve 1 back on afterward."""
+    async with FakeModbusServer() as server:
+        bus = EventBus()
+        controller = await make_controller(server, bus, total_channels=2)
+
+        controller.min_toggle_interval = 1.0
+        controller._last_command_time[1] = time.monotonic()
+        controller.set_valve_state(1, True)
+        await asyncio.sleep(0.05)  # let the consumer dequeue it and enter the ~1s min-interval wait
+
+        writes_before_estop = len(server.received_writes)
+        confirmed = await controller.emergency_all_off()
+        assert confirmed == 2  # both relays confirmed off
+        assert (1, 1, OFF_VALUE) in server.received_writes[writes_before_estop:]
+
+        await asyncio.sleep(1.2)  # long enough for the stale command's ~1s wait to have elapsed
+
+        assert (1, 1, ON_VALUE) not in server.received_writes[writes_before_estop:], (
+            "a command already in flight when the E-stop fired still turned valve 1 back on"
+        )
 
         await controller.disconnect()
 

@@ -25,6 +25,7 @@ rather than a continuously-driven analog output, do not need it).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from typing import Callable, Optional
@@ -59,11 +60,18 @@ class ZoneScenarioPlayer:
 
         # device_id -> last-refreshed monotonic time, for devices whose state
         # must be continuously re-affirmed (see ZoneRuntime's watchdog opt-in).
+        # Mutate this ONLY through mark_device_active/mark_device_inactive
+        # below, never directly -- see _watchdog_task's comment for why.
         self.active_devices: dict[str, float] = {}
         self.watchdog_timeout = DEFAULT_WATCHDOG_TIMEOUT
 
         self._last_device_states: dict[str, object] = {}
         self._task: Optional[asyncio.Task] = None
+        # Runs _check_watchdog on a fixed cadence independent of playback
+        # state -- see mark_device_active. None until the first device
+        # opts in, so a zone that never uses the watchdog (valve/light-only,
+        # or a bare test fixture) never spins an idle poll loop.
+        self._watchdog_task: Optional[asyncio.Task] = None
 
         self.audio = AudioPlayer()
         self._loaded_music_file: Optional[str] = None
@@ -164,7 +172,7 @@ class ZoneScenarioPlayer:
     async def stop(self) -> None:
         self.is_playing = False
         self.is_paused = False
-        self.active_devices.clear()
+        self._force_stop_active_devices()
         if self._task:
             self._task.cancel()
             self._task = None
@@ -173,6 +181,51 @@ class ZoneScenarioPlayer:
             self._loaded_music_file = None
         self.reset()
         self._publish_status("stopped")
+
+    def _force_stop_active_devices(self) -> None:
+        """STOP_ZONE used to just `active_devices.clear()` -- that stops the
+        WATCHDOG from ever looking at those devices again, but does nothing
+        to the devices themselves: a motor already spinning at its last
+        commanded frequency keeps spinning, silently, with its only safety
+        net (the watchdog) now gone. Sends the same {"active": False, "on":
+        False} the watchdog itself sends on a timeout to every currently-
+        tracked device before forgetting about it, so Stop actually stops
+        the hardware it was tracking, not just the scenario clock."""
+        for device_id in list(self.active_devices):
+            if self.on_device_event:
+                try:
+                    self.on_device_event(Event(time=self.current_position, device_id=device_id, parameters={"active": False, "on": False}))
+                except Exception:  # noqa: BLE001 -- one bad device must not stop the rest from being force-stopped
+                    logger.exception("zone %s: force-stop on stop() failed for device %s", self.zone_id, device_id)
+        self.active_devices.clear()
+
+    def mark_device_active(self, device_id: str) -> None:
+        """Registers/refreshes `device_id` in the watchdog set and makes
+        sure the standalone watchdog task (_watchdog_loop, below) is
+        actually running -- started lazily here, not unconditionally in
+        __init__, so a zone with nothing that ever opts into the watchdog
+        (a valve/light-only zone, or a bare test fixture that never calls
+        this) never spins an idle poll loop for nothing. Call this instead
+        of writing `active_devices` directly."""
+        self.active_devices[device_id] = time.monotonic()
+        if self._watchdog_task is None or self._watchdog_task.done():
+            self._watchdog_task = asyncio.create_task(self._watchdog_loop())
+
+    def mark_device_inactive(self, device_id: str) -> None:
+        self.active_devices.pop(device_id, None)
+
+    async def aclose(self) -> None:
+        """Must be called when this player's zone is being torn down for
+        good -- DISCONNECT_ZONE/DELETE_ZONE/REMOVE_DRIVER_INSTANCE, see
+        ZoneRuntime.disconnect(). Without this the watchdog task outlives
+        the zone that started it, holding a reference to `self` and
+        polling an `active_devices` dict nothing can add to or clear
+        through anymore."""
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watchdog_task
+            self._watchdog_task = None
 
     async def seek(self, position: float) -> None:
         if not self.project:
@@ -255,6 +308,31 @@ class ZoneScenarioPlayer:
 
                 elapsed = time.monotonic() - loop_start
                 await asyncio.sleep(max(0.0, self.tick_interval - elapsed))
+        except asyncio.CancelledError:
+            raise
+
+    async def _watchdog_loop(self) -> None:
+        """Runs on a fixed cadence for the rest of this player's life,
+        independent of whether a scenario is actually ticking. The tick
+        loop's own _check_watchdog call above only exists while
+        `_loop` is running its "playing" branch -- a device marked active
+        by a manual Devices-tab test-fire with nothing playing at all, or
+        one still active when a show reaches its natural end (is_playing
+        goes False and `_loop` returns for good, right below), used to
+        have NOTHING ever check it again. Skipped only while genuinely
+        `is_paused` -- see pause()'s own comment: hardware is meant to
+        stay exactly as it was during an intentional pause, not get
+        auto-timed-out by a safety net meant to catch a STALLED event
+        stream, which a deliberate pause isn't."""
+        try:
+            while True:
+                await asyncio.sleep(0.5)
+                if self.is_paused:
+                    continue
+                try:
+                    self._check_watchdog(time.monotonic())
+                except Exception:  # noqa: BLE001
+                    logger.exception("zone %s: standalone watchdog check failed, continuing", self.zone_id)
         except asyncio.CancelledError:
             raise
 

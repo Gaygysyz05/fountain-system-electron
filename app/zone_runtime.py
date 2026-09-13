@@ -11,7 +11,6 @@ across six zones" the same code path.
 from __future__ import annotations
 
 import logging
-import time
 
 from app.drivers.base import DeviceCategory, DriverInstance, create_instance, get_driver
 from app.event_bus import EventBus
@@ -143,6 +142,17 @@ class ZoneRuntime:
         self.instance_driver_types.pop(instance_id, None)
         self.instance_configs.pop(instance_id, None)
         if instance:
+            # Stop whatever this instance is driving BEFORE disconnecting
+            # it -- disconnect() alone (cancel tasks, close the socket)
+            # used to leave a motor spinning at its last commanded
+            # frequency, or a light lit at its last color, with nothing in
+            # the daemon able to reach it anymore once the device map
+            # entries below are removed: no watchdog, no reconnect, no
+            # way to address it short of re-adding the instance by hand.
+            try:
+                await instance.emergency_stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("zone %s: failed to stop instance %s before removing it", self.zone_id, instance_id)
             await instance.disconnect()
 
         stale_devices = [d for d, (iid, _) in self.device_map.items() if iid == instance_id]
@@ -198,13 +208,23 @@ class ZoneRuntime:
         self.device_categories.pop(device_id, None)
         self.device_nozzle_info.pop(device_id, None)
         self.device_last_parameters.pop(device_id, None)
-        self.player.active_devices.pop(device_id, None)
+        self.player.mark_device_inactive(device_id)
 
     # -- lifecycle --------------------------------------------------------------
 
     async def disconnect(self) -> None:
         await self.player.stop()
-        for instance in list(self.driver_instances.values()):
+        await self.player.aclose()
+        for instance_id, instance in list(self.driver_instances.items()):
+            # Same reasoning as remove_driver_instance: stop the hardware
+            # before tearing down the connection to it, not after -- a
+            # motor or light left running here has no watchdog, no
+            # reconnect, and no way to be reached again once the state
+            # below is cleared.
+            try:
+                await instance.emergency_stop()
+            except Exception:  # noqa: BLE001
+                logger.exception("zone %s: failed to stop instance %s before disconnecting", self.zone_id, instance_id)
             try:
                 await instance.disconnect()
             except Exception:  # noqa: BLE001
@@ -228,11 +248,24 @@ class ZoneRuntime:
         the next tick isn't one. Stopping the player also clears
         active_devices (the watchdog set), which is correct here: nothing
         should still be "must be refreshed or force-stopped" once every
-        instance has already been told to stop."""
+        instance has already been told to stop.
+
+        device_last_parameters is cleared too, for a related reason: those
+        are the values set_global_brightness/_speed re-sends to "live"
+        devices when the operator moves a slider (see _reapply_live_devices).
+        Left in place, the very next slider touch after an E-stop -- an
+        entirely plausible next move, "let me turn the speed down before
+        restarting" -- would silently re-dispatch every motor's/light's
+        LAST pre-stop parameters (e.g. "running at 30Hz") right back to the
+        hardware, with no scenario playing and thus no watchdog to catch it
+        again afterward. An E-stopped device has nothing "live" left to
+        re-apply until a real new command sets it again."""
         try:
             await self.player.stop()
         except Exception:  # noqa: BLE001
             logger.exception("zone %s: failed to stop scenario player during emergency stop", self.zone_id)
+
+        self.device_last_parameters.clear()
 
         for instance_id, instance in list(self.driver_instances.items()):
             try:
@@ -319,9 +352,9 @@ class ZoneRuntime:
 
         if category == DeviceCategory.MOTOR:
             if parameters.get("active", False):
-                self.player.active_devices[device_id] = time.monotonic()
+                self.player.mark_device_active(device_id)
             else:
-                self.player.active_devices.pop(device_id, None)
+                self.player.mark_device_inactive(device_id)
 
             if self.global_speed != 1.0 and "frequency" in parameters:
                 parameters["frequency"] = parameters["frequency"] * self.global_speed

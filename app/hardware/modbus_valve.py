@@ -19,6 +19,7 @@ What changed vs. the original and why:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 
@@ -236,7 +237,29 @@ class AsyncValveController:
         watching. If relays are still unconfirmed after every retry, that's
         reported as a critical HardwareErrorEvent -- not just logged --
         since at that point the operator needs to go check that valve by
-        hand, not trust the software."""
+        hand, not trust the software.
+
+        "Bypasses the queue" used to only mean "writes directly instead of
+        calling _enqueue" -- it did nothing about a burst already SITTING
+        in _command_queue (e.g. a scenario tick's "open valve 5" that lost
+        the race with the E-stop by a few milliseconds) or about
+        _command_consumer, which keeps running and would still pull that
+        burst and write it, interleaved with or immediately after our own
+        "off" writes on the very same connection, with nothing serializing
+        the two against each other. That could leave a valve the operator
+        just told to close reopened a moment later. So the queue is
+        drained and the consumer task cancelled (and awaited, so any write
+        it's mid-flight on has actually finished) before the direct writes
+        below happen, then the consumer is restarted afterward -- unless
+        we're mid-disconnect(), which already set _closing and will tear
+        the controller down right after this returns."""
+        while not self._command_queue.empty():
+            self._command_queue.get_nowait()
+        if self._consumer_task:
+            self._consumer_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._consumer_task
+
         remaining = set(range(1, self.total_channels + 1))
         confirmed: set[int] = set()
 
@@ -262,6 +285,9 @@ class AsyncValveController:
                 "-- check them by hand",
                 severity="critical",
             )
+
+        if not self._closing and (not self._consumer_task or self._consumer_task.done()):
+            self._consumer_task = asyncio.create_task(self._command_consumer())
 
         return len(confirmed)
 

@@ -237,6 +237,106 @@ async def test_set_global_brightness_retroactively_rescales_an_already_lit_light
     assert light.applied[-1] == ("1", {"r": 100.0, "g": 50.0, "b": 0.0})
 
 
+async def test_emergency_stop_clears_live_parameters_so_global_slider_does_not_rearm() -> None:
+    """emergency_stop() used to only stop the player and the driver
+    instances -- it never cleared device_last_parameters, the cache
+    set_global_speed/_brightness's _reapply_live_devices() uses to
+    re-dispatch a device's last parameters when the operator moves a
+    slider. Left in place, touching a slider right after an E-stop --  an
+    entirely plausible next move -- would silently re-send the motor's
+    LAST pre-stop frequency straight back to the hardware, with no
+    scenario running and thus no watchdog to catch it again."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    motor = FakeDriverInstance(DeviceCategory.MOTOR)
+    _register_fake_instance(zone, "inv1", motor)
+    await zone.add_device("M1", "inv1", "1")
+
+    zone.set_device_state("M1", {"frequency": 30.0, "active": True})
+    assert motor.applied[-1] == ("1", {"frequency": 30.0, "active": True})
+
+    await zone.emergency_stop()
+    applied_count_after_estop = len(motor.applied)
+
+    zone.set_global_speed(50)  # must NOT re-arm the motor from its pre-stop parameters
+
+    assert len(motor.applied) == applied_count_after_estop
+
+
+def _track_stop_before_disconnect(instance: FakeDriverInstance) -> list[str]:
+    calls: list[str] = []
+    real_emergency_stop = instance.emergency_stop
+    real_disconnect = instance.disconnect
+
+    async def tracked_emergency_stop() -> None:
+        calls.append("emergency_stop")
+        await real_emergency_stop()
+
+    async def tracked_disconnect() -> None:
+        calls.append("disconnect")
+        await real_disconnect()
+
+    instance.emergency_stop = tracked_emergency_stop  # type: ignore[method-assign]
+    instance.disconnect = tracked_disconnect  # type: ignore[method-assign]
+    return calls
+
+
+async def test_remove_driver_instance_stops_hardware_before_disconnecting() -> None:
+    """remove_driver_instance used to disconnect() an instance (cancel
+    tasks, close the socket) with no emergency_stop() first -- a motor
+    spinning at its last commanded frequency, or a light lit at its last
+    color, was left running with nothing in the daemon able to reach it
+    once the instance and its devices were removed: no watchdog, no
+    reconnect, no way to address it short of re-adding by hand."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    motor = FakeDriverInstance(DeviceCategory.MOTOR)
+    calls = _track_stop_before_disconnect(motor)
+    _register_fake_instance(zone, "inv1", motor)
+    await zone.add_device("M1", "inv1", "1")
+
+    await zone.remove_driver_instance("inv1")
+
+    assert calls == ["emergency_stop", "disconnect"]
+
+
+async def test_disconnect_stops_hardware_before_disconnecting_every_instance() -> None:
+    """Same gap as remove_driver_instance above, for full zone teardown
+    (DISCONNECT_ZONE / DELETE_ZONE): disconnect() used to tear down every
+    instance's connection with no emergency_stop() first."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    motor = FakeDriverInstance(DeviceCategory.MOTOR)
+    calls = _track_stop_before_disconnect(motor)
+    _register_fake_instance(zone, "inv1", motor)
+    await zone.add_device("M1", "inv1", "1")
+
+    await zone.disconnect()
+
+    assert calls == ["emergency_stop", "disconnect"]
+
+
+async def test_disconnect_stops_the_scenario_players_watchdog_task() -> None:
+    """disconnect() used to never call player.aclose() -- the standalone
+    watchdog task (started lazily so a device marked active while nothing
+    is playing still gets checked, see ZoneScenarioPlayer.mark_device_active)
+    would then outlive the zone that started it, holding a reference to the
+    player and polling a dict nothing can add to or clear through anymore."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    motor = FakeDriverInstance(DeviceCategory.MOTOR)
+    _register_fake_instance(zone, "inv1", motor)
+    await zone.add_device("M1", "inv1", "1")
+
+    zone.player.mark_device_active("M1")  # starts the standalone watchdog task
+    watchdog_task = zone.player._watchdog_task
+    assert watchdog_task is not None and not watchdog_task.done()
+
+    await zone.disconnect()
+
+    assert watchdog_task.done()
+
+
 async def test_add_driver_instance_uses_the_schema_default_total_channels() -> None:
     """total_channels defaults to 32 on ModbusValveConfig when the raw
     config omits it entirely -- a real operator flow (the config form only

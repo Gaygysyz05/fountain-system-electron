@@ -44,6 +44,7 @@ bypasses all queueing and ramping, as it must.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 
 from pymodbus.client import AsyncModbusTcpClient
@@ -250,11 +251,31 @@ class AsyncInverterManager:
         frequency command. Safe to run concurrently across motors even
         though they share a bus: `_bus_lock` inside each controller
         serializes the actual transactions, so `gather` here just lets
-        Python schedule them, not send them, in parallel."""
+        Python schedule them, not send them, in parallel.
+
+        Draining the queues below only removes commands that haven't been
+        picked up yet. It does nothing about a consumer that's already
+        inside `_apply_frequency`'s ramp loop -- it dequeued its command
+        before we got here and is now just sleeping between steps, and per
+        that loop's own bail-out condition an EMPTY queue does NOT stop it
+        (only a NEWER queued command does). Left alone, that ramp would
+        keep stepping toward its pre-E-stop target for up to several
+        seconds after this method returns and reports every motor stopped.
+        So each motor's consumer task is cancelled outright to kill any
+        in-flight ramp before we ask the controller for an actual stop, then
+        restarted so the motor keeps accepting commands afterward -- without
+        that restart, a queue with no task reading it would silently
+        swallow every command until the next reconnect."""
         logger.warning("EMERGENCY stop all motors on %s:%s", self.host, self.port)
         for queue in self._queues.values():
             while not queue.empty():
                 queue.get_nowait()
+
+        for task in self._consumer_tasks.values():
+            task.cancel()
+        for task in list(self._consumer_tasks.values()):
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
         async def _stop_one(controller: AsyncInverterController) -> bool:
             try:
@@ -266,6 +287,12 @@ class AsyncInverterManager:
         results = await asyncio.gather(*(_stop_one(c) for c in connected))
         stopped = sum(results)
         logger.warning("emergency stop: %s/%s motors confirmed stopped", stopped, len(connected))
+
+        if not self._closing:
+            for slave_id in self.inverters:
+                if slave_id not in self._consumer_tasks or self._consumer_tasks[slave_id].done():
+                    self._consumer_tasks[slave_id] = asyncio.create_task(self._consumer(slave_id))
+
         return stopped
 
     async def stop_all(self) -> int:

@@ -90,6 +90,23 @@ class AsyncArtNetController:
         for i in UNIVERSES:
             self.target_colors[i] = [0, 0, 0]
 
+    async def emergency_stop(self) -> None:
+        """all_off() only moves the fade TARGET to black -- actual blackout
+        still depends on _fader_loop easing current_colors down over its own
+        60fps ticks, roughly 0.5-0.7s from a fully-on color given
+        SMOOTH_SPEED's geometric decay. That's fine for a normal "lights
+        off" but not for an emergency stop, where the whole point is that
+        the hardware reaches a safe state the instant this call returns.
+        So both current_colors and target_colors are snapped to black
+        directly (no easing to interrupt -- there's nothing left to ease
+        toward) and the zero DMX frame is sent synchronously right here,
+        instead of leaving it to whatever the fader task happens to be
+        mid-step on at the moment this is called."""
+        for i in UNIVERSES:
+            self.current_colors[i] = [0.0, 0.0, 0.0]
+            self.target_colors[i] = [0, 0, 0]
+        await self._send_current_buffer()
+
     async def _fader_loop(self) -> None:
         while self._running:
             changed = False
