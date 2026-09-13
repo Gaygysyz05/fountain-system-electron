@@ -6,6 +6,7 @@ import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment
 import * as THREE from "three";
 import { errorMessage } from "../../lib/errors";
 import { useConfigStore } from "../../store/configStore";
+import { useConnectionStore } from "../../store/connectionStore";
 import { useZonesStore, deviceStateKey } from "../../store/zonesStore";
 import { INPUT_CLASS } from "../../lib/styles";
 import { jetState } from "../../lib/waterJet";
@@ -138,7 +139,8 @@ interface MappedDevice {
   zoneId: number;
   instanceId: string;
   channel: string;
-  category: "valve" | "motor" | "light";
+  // Only valve/motor -- mappedDevices below already filters out "light" (nothing to animate as a jet), so this stays narrow rather than widening every consumer to handle a case that can't occur.
+  category: "valve" | "motor";
   modelNode: string;
 }
 
@@ -181,17 +183,40 @@ function SelectionMarker({ scene, nodeName }: { scene: THREE.Group; nodeName: st
   );
 }
 
+/** A smaller marker at every OTHER already-mapped node, so the whole mapping is visible at a glance while editing -- without this, only the one node just clicked showed anything, and the rest of the assignments were invisible until clicked one at a time. */
+function MappedNodeMarkers({ scene, devices, exceptNode }: { scene: THREE.Group; devices: MappedDevice[]; exceptNode: string | null }): JSX.Element {
+  return (
+    <>
+      {devices.map((d) => {
+        if (d.modelNode === exceptNode) return null; // SelectionMarker already covers this one
+        const node = scene.getObjectByName(d.modelNode);
+        if (!node) return null;
+        const position = node.getWorldPosition(new THREE.Vector3());
+        return (
+          <mesh key={d.deviceId} position={[position.x, position.y, position.z]}>
+            <sphereGeometry args={[0.09, 10, 10]} />
+            <meshBasicMaterial color="#3ddc84" wireframe />
+          </mesh>
+        );
+      })}
+    </>
+  );
+}
+
 export function ScenePreview(): JSX.Element {
   const configuredZones = useConfigStore((s) => s.zones);
   const loadZones = useConfigStore((s) => s.loadZones);
   const selectedZoneId = useConfigStore((s) => s.selectedZoneId);
   const setDeviceModelNode = useConfigStore((s) => s.setDeviceModelNode);
+  const sendCommand = useConnectionStore((s) => s.sendCommand);
   const [modelError, setModelError] = useState<string | null>(null);
   const [scene, setScene] = useState<THREE.Group | null>(null);
 
   const [mappingMode, setMappingMode] = useState(false);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [assignDeviceId, setAssignDeviceId] = useState("");
+  const [testingOn, setTestingOn] = useState(false);
+  const testingRef = useRef<MappedDevice | null>(null); // the device the Test button last turned on, if any -- read from a ref so the unmount/selection-change cleanup below always sees the latest value
 
   useEffect(() => {
     void loadZones();
@@ -230,6 +255,39 @@ export function ScenePreview(): JSX.Element {
     await setDeviceModelNode(currentAssignment.zoneId, currentAssignment.deviceId, null);
   }
 
+  function testParameters(category: "valve" | "motor", on: boolean): Record<string, unknown> {
+    // 10Hz matches DeviceConfigPanel's own motor test-fire convention -- one shared "what does a manual test look like" number, not a second one invented here.
+    return category === "valve" ? { on } : { active: on, frequency: on ? 10 : 0 };
+  }
+
+  function stopTesting(): void {
+    const device = testingRef.current;
+    if (!device) return;
+    testingRef.current = null;
+    void sendCommand({ command: "SET_DEVICE_STATE", zone_id: device.zoneId, device_id: device.deviceId, parameters: testParameters(device.category, false) });
+  }
+
+  function toggleTest(): void {
+    if (!currentAssignment) return;
+    if (testingRef.current) {
+      stopTesting();
+      setTestingOn(false);
+      return;
+    }
+    testingRef.current = currentAssignment;
+    void sendCommand({ command: "SET_DEVICE_STATE", zone_id: currentAssignment.zoneId, device_id: currentAssignment.deviceId, parameters: testParameters(currentAssignment.category, true) });
+    setTestingOn(true);
+  }
+
+  // Nothing left energized just because the operator clicked a different
+  // node, hit "Done mapping", or navigated away from Preview entirely --
+  // same reasoning as DeviceConfigPanel's ValveTestControl.
+  useEffect(() => {
+    setTestingOn(false);
+    return () => stopTesting();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- selection-change/unmount only, stopTesting reads testingRef for the latest value
+  }, [selectedNode]);
+
   return (
     <div className="relative flex-1 overflow-hidden bg-bg-base">
       <Canvas camera={{ position: [6, 5, 9], fov: 50 }} dpr={[1, 1.5]}>
@@ -239,8 +297,14 @@ export function ScenePreview(): JSX.Element {
         <gridHelper args={[20, 20, "#464647", "#2d2d30"]} />
         <SceneEnvironment />
         <FountainModel onLoaded={setScene} onError={setModelError} pickable={mappingMode} onPickNode={setSelectedNode} />
-        {scene && !mappingMode && <WaterJets scene={scene} devices={mappedDevices} />}
-        {scene && mappingMode && <SelectionMarker scene={scene} nodeName={selectedNode} />}
+        {/* Kept mounted in mapping mode too, not just normal viewing -- otherwise the Test button's whole point (see it actually spray) has nothing to show. */}
+        {scene && <WaterJets scene={scene} devices={mappedDevices} />}
+        {scene && mappingMode && (
+          <>
+            <SelectionMarker scene={scene} nodeName={selectedNode} />
+            <MappedNodeMarkers scene={scene} devices={mappedDevices} exceptNode={selectedNode} />
+          </>
+        )}
         <CameraControls />
       </Canvas>
 
@@ -272,6 +336,13 @@ export function ScenePreview(): JSX.Element {
                       <span className="text-text-muted">Assigned to: </span>
                       <span className="font-medium text-text-primary">{currentAssignment.deviceId}</span>
                     </div>
+                    <button
+                      onClick={toggleTest}
+                      title="Fires the same SET_DEVICE_STATE the Devices tab's manual test uses -- only visible if this device's actual hardware is connected."
+                      className={`h-control rounded-control border border-border px-sm text-xs text-text-primary hover:bg-bg-surface2 ${testingOn ? "bg-warning/20 text-warning" : "bg-bg-surface3"}`}
+                    >
+                      {testingOn ? "Stop test" : "Test"}
+                    </button>
                     <button onClick={() => void handleClear()} className="h-control rounded-control border border-border bg-bg-surface3 px-sm text-xs text-text-primary hover:bg-bg-surface2">
                       Clear assignment
                     </button>
@@ -299,6 +370,23 @@ export function ScenePreview(): JSX.Element {
                 )}
               </div>
             )}
+          </div>
+        )}
+
+        {mappingMode && mappedDevices.length > 0 && (
+          <div className="w-72 rounded-panel border border-border bg-bg-surface1 p-md text-sm">
+            <div className="mb-xs text-text-muted">Mapped ({mappedDevices.length})</div>
+            <div className="flex max-h-48 flex-col gap-1 overflow-y-auto">
+              {mappedDevices.map((d) => (
+                <button
+                  key={d.deviceId}
+                  onClick={() => setSelectedNode(d.modelNode)}
+                  className={`rounded-control px-xs py-0.5 text-left text-xs hover:bg-bg-surface2 ${d.modelNode === selectedNode ? "bg-bg-surface2 text-text-primary" : "text-text-secondary"}`}
+                >
+                  {d.deviceId} → {d.modelNode}
+                </button>
+              ))}
+            </div>
           </div>
         )}
       </div>
