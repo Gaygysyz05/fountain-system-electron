@@ -1,21 +1,4 @@
-"""
-Async rewrite of hardware/valve_controller.py (ModbusRelayController).
-
-What changed vs. the original and why:
-  - pymodbus's sync ModbusTcpClient + a hand-rolled threading.Thread/Queue worker
-    -> AsyncModbusTcpClient + a single asyncio consumer task on the daemon's own
-       event loop. No extra OS thread per controller, no GIL contention with the
-       scenario player's tick loop.
-  - `elapsed = time.time() - self.last_command_time` was computed and never used
-    (dead code) -> min_toggle_interval is now actually enforced per relay before
-    every write. This is the Step 3 safety interlock: it stops the mechanism
-    being commanded to flip faster than the physical valve can survive.
-  - print() on failure -> HardwareErrorEvent / ConnectionStateEvent on the bus,
-    so a dropped connection is visible to the UI instead of only to a console
-    that nobody is watching on an unattended install.
-  - A lost connection no longer needs anyone to notice and click "reconnect":
-    a background watchdog task retries with backoff on its own.
-"""
+"""Async, event-bus-driven valve controller; enforces min_toggle_interval per relay as a hardware safety interlock and auto-reconnects via a background watchdog."""
 from __future__ import annotations
 
 import asyncio
@@ -74,12 +57,7 @@ class AsyncValveController:
 
     async def connect(self) -> bool:
         if self._client is not None:
-            # _reconnect_watchdog calls connect() again on every retry while
-            # not _connected -- without closing the PREVIOUS client first,
-            # each failed/dropped attempt on a flaky link (exactly what the
-            # watchdog exists to ride out) leaks that old socket/transport
-            # instead of replacing it, one more descriptor gone every retry
-            # on a long-running unattended install.
+            # Close the previous client first, or every watchdog retry leaks its socket.
             self._client.close()
         try:
             self._client = AsyncModbusTcpClient(host=self.host, port=self.port, timeout=self.write_timeout)
@@ -140,8 +118,7 @@ class AsyncValveController:
     # -- internals -----------------------------------------------------------
 
     async def _command_consumer(self) -> None:
-        """Single writer for this Modbus connection: coalesces bursts, one command
-        in flight at a time (a TCP relay module can only process one transaction)."""
+        """Single writer for this connection: coalesces bursts since the relay board can only process one transaction at a time."""
         while True:
             merged = dict(await self._command_queue.get())
             while not self._command_queue.empty():
@@ -185,18 +162,8 @@ class AsyncValveController:
         relative_relay = (relay_num - 1) % 32 + 1
         value = ON_VALUE if state else OFF_VALUE
 
-        # A Modbus *exception response* (result.isError()) means the board
-        # is alive and answered, it just rejected this one transaction
-        # (e.g. an out-of-range register on a shared bus) -- that is NOT the
-        # same thing as the transport itself being down, and must not be
-        # treated as one. An earlier version raised ModbusException here to
-        # route both cases through the same `except` block below, which
-        # meant a single rejected relay wrongly marked the WHOLE connection
-        # dead and, via emergency_all_off()'s retry loop, cascade-failed
-        # every other relay in that pass too (found while testing that
-        # retry logic against a fake relay board that rejects exactly one
-        # write) -- only a genuine transport failure (timeout/socket error)
-        # should flip `_connected`.
+        # A Modbus exception response (result.isError()) means the board rejected this
+        # transaction but is still alive -- only a transport failure below should flip `_connected`.
         try:
             result = await asyncio.wait_for(
                 self._client.write_register(address=relative_relay, value=value, device_id=target_slave),
@@ -225,34 +192,7 @@ class AsyncValveController:
             await asyncio.sleep(self._reconnect_delay)
 
     async def emergency_all_off(self, retries: int = 2) -> int:
-        """Bypasses the queue: direct sequential writes, highest channel
-        first, same order as the original — mirrors physical wiring
-        assumptions on site.
-
-        Retries whichever relays didn't get their OFF write acknowledged --
-        the original only ever wrote once and moved on, so a single
-        transient Modbus error during an E-stop (the one command in this
-        whole system where "probably closed" isn't good enough) could leave
-        a valve silently open with nothing but a log line nobody was
-        watching. If relays are still unconfirmed after every retry, that's
-        reported as a critical HardwareErrorEvent -- not just logged --
-        since at that point the operator needs to go check that valve by
-        hand, not trust the software.
-
-        "Bypasses the queue" used to only mean "writes directly instead of
-        calling _enqueue" -- it did nothing about a burst already SITTING
-        in _command_queue (e.g. a scenario tick's "open valve 5" that lost
-        the race with the E-stop by a few milliseconds) or about
-        _command_consumer, which keeps running and would still pull that
-        burst and write it, interleaved with or immediately after our own
-        "off" writes on the very same connection, with nothing serializing
-        the two against each other. That could leave a valve the operator
-        just told to close reopened a moment later. So the queue is
-        drained and the consumer task cancelled (and awaited, so any write
-        it's mid-flight on has actually finished) before the direct writes
-        below happen, then the consumer is restarted afterward -- unless
-        we're mid-disconnect(), which already set _closing and will tear
-        the controller down right after this returns."""
+        """Drains the queue and stops the consumer task (awaited) first so a queued command can't race this E-stop and reopen a valve; retries unconfirmed relays and raises a critical error if any still won't confirm OFF."""
         while not self._command_queue.empty():
             self._command_queue.get_nowait()
         if self._consumer_task:

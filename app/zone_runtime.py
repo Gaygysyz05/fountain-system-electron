@@ -1,13 +1,4 @@
-"""
-Bundles one zone's scheduler + driver instances and routes scenario events
-between them. Rewritten around the driver registry (app/drivers/base.py):
-ZoneRuntime no longer knows about valves/motors/lights as distinct fields --
-it holds an arbitrary set of driver instances (physical connections) and a
-device map (scenario-facing device_id -> which instance + channel), built up
-entirely from ADD_DRIVER_INSTANCE / ADD_DEVICE commands rather than a fixed
-zone_config shape. This is what makes "one fountain" and "forty fountains
-across six zones" the same code path.
-"""
+"""Bundles one zone's scheduler + driver instances, keyed by an arbitrary device map (not fixed valve/motor/light fields) so one fountain and forty fountains across six zones share the same code path."""
 from __future__ import annotations
 
 import logging
@@ -34,20 +25,10 @@ class ZoneRuntime:
         self.device_map: dict[str, tuple[str, str]] = {}  # device_id -> (instance_id, channel)
         self.device_categories: dict[str, DeviceCategory] = {}
         self.device_nozzle_info: dict[str, tuple[str, int]] = {}  # device_id -> (nozzle_group, inverter 1|2), motor devices only
-        # device_id -> the last BASE (pre-global-scaling) parameters applied
-        # to it, from either a scenario event or a manual set_device_state.
-        # Exists purely so set_global_brightness/_speed (below) can
-        # immediately re-derive and re-send a live device's on-the-wire
-        # state against the NEW multiplier -- see their docstring.
+        # device_id -> last BASE (pre-global-scaling) parameters, so set_global_brightness/_speed can re-derive and re-send live devices against a new multiplier.
         self.device_last_parameters: dict[str, dict] = {}
 
-        # Global live-control multipliers (SET_GLOBAL_BRIGHTNESS/_SPEED).
-        # Applied here, not in ZoneScenarioPlayer, because the scheduler is
-        # deliberately category-agnostic (see its docstring) -- it has no
-        # idea a "light" event's r/g/b means brightness or a "motor" event's
-        # frequency means speed. ZoneRuntime already looks up the category
-        # for every event anyway (the watchdog opt-in below), so applying
-        # the multiplier here costs nothing extra and keeps the scheduler clean.
+        # Global live-control multipliers; applied here rather than in the category-agnostic ZoneScenarioPlayer, which doesn't know r/g/b means brightness or frequency means speed.
         self.global_brightness = 1.0
         self.global_speed = 1.0
 
@@ -57,22 +38,12 @@ class ZoneRuntime:
         self.name = (name or "").strip() or None
 
     def set_global_brightness(self, value: int) -> None:
-        """Valve/light/motor state is level-triggered (stays exactly as
-        last set until something changes it -- see _dispatch_device_state)
-        -- this used to only update the multiplier itself, so a light
-        already lit when the operator dragged this slider stayed at its
-        OLD brightness on the actual hardware until that device's next
-        scenario cue, which could be seconds away or might never come
-        again for the rest of the show. Re-dispatching every live light's
-        last known base parameters makes the change visible immediately,
-        same as a scenario event would."""
+        """Re-dispatches every live light's last base parameters immediately, since level-triggered state otherwise wouldn't reflect a new multiplier until that device's next scenario cue."""
         self.global_brightness = max(0.0, min(1.0, value / 100.0))
         self._reapply_live_devices(DeviceCategory.LIGHT)
 
     def set_global_speed(self, value: int) -> None:
-        """Same gap as set_global_brightness above, for motors: a running
-        VFD's actual output frequency used to stay unscaled until its next
-        scenario event."""
+        """Same gap as set_global_brightness, for motors."""
         self.global_speed = max(0.0, min(1.0, value / 100.0))
         self._reapply_live_devices(DeviceCategory.MOTOR)
 
@@ -90,48 +61,19 @@ class ZoneRuntime:
         category = get_driver(driver_type).category
         instance, validated_config = create_instance(self.zone_id, instance_id, driver_type, config, self.bus)
 
-        # Registered regardless of whether this first connect attempt
-        # succeeds: hardware being unreachable at configure-time (not yet
-        # powered on, cabling not run yet) is a normal setup state, not a
-        # reason to forget the instance was ever configured. It must still
-        # show up in GET /zones, survive into installation.json, and be
-        # retried by CONNECT_ZONE / on daemon restart -- see app/persistence.py.
+        # Registered regardless of connect success: unreachable hardware at configure-time is a normal setup state, and the instance must still appear in GET /zones, persist to installation.json, and be retried by CONNECT_ZONE/restart.
         self.driver_instances[instance_id] = instance
         self.instance_categories[instance_id] = category
         self.instance_driver_types[instance_id] = driver_type
         self.instance_configs[instance_id] = config
 
-        # A driver whose config declares a fixed channel count (a 32-channel
-        # relay board's total_channels, say) has every one of those channels
-        # physically present the moment the board itself is configured --
-        # there's no real "add channel 7" step for hardware where channel 7
-        # already exists on the PCB. Auto-registering them here means the
-        # operator sets total_channels ONCE, instead of clicking "Add
-        # device" once per channel (32 times for a full relay bank). Device
-        # IDs are namespaced by instance_id so two boards each with their
-        # own channels 1..32 don't collide. Only fires for driver configs
-        # that actually declare total_channels (currently just
-        # modbus_relay_valve) -- motors and Art-Net lights have no such
-        # fixed-bank concept and still get added one at a time.
-        #
-        # Read from validated_config, not the raw config dict: total_channels
-        # has a schema default (32) that an operator who omits the field
-        # entirely never sees reflected in raw_config, and a value submitted
-        # as e.g. the string "32" only becomes a real int after validation --
-        # either case used to make this isinstance(..., int) check silently
-        # false and skip auto-registration altogether.
+        # Drivers that declare a fixed total_channels (e.g. modbus_relay_valve) get every channel auto-registered here instead of one at a time; reads validated_config (not raw config) so a schema-defaulted or string-coerced total_channels doesn't silently fail this isinstance check.
         total_channels = getattr(validated_config, "total_channels", None)
         if isinstance(total_channels, int) and total_channels > 0:
             for channel in range(1, total_channels + 1):
                 await self.add_device(f"{instance_id}-{channel}", instance_id, str(channel))
 
-        # connect=False lets a caller register the instance's configuration
-        # (so it immediately shows up in GET /zones, and other instances
-        # queued alongside it aren't blocked waiting on this one) without
-        # dialing out yet -- see persistence.load_installation, which
-        # registers every configured instance up front and connects them
-        # all concurrently in the background afterward, rather than one at
-        # a time on the daemon's own startup path.
+        # connect=False registers the config (visible in GET /zones) without dialing out yet -- used by persistence.load_installation to register everything up front, then connect all instances concurrently in the background.
         if not connect:
             return False
         return await instance.connect()
@@ -142,13 +84,7 @@ class ZoneRuntime:
         self.instance_driver_types.pop(instance_id, None)
         self.instance_configs.pop(instance_id, None)
         if instance:
-            # Stop whatever this instance is driving BEFORE disconnecting
-            # it -- disconnect() alone (cancel tasks, close the socket)
-            # used to leave a motor spinning at its last commanded
-            # frequency, or a light lit at its last color, with nothing in
-            # the daemon able to reach it anymore once the device map
-            # entries below are removed: no watchdog, no reconnect, no
-            # way to address it short of re-adding the instance by hand.
+            # Stop before disconnecting: otherwise a motor/light left running here has no watchdog, reconnect, or way to be reached once the device map entries below are removed.
             try:
                 await instance.emergency_stop()
             except Exception:  # noqa: BLE001
@@ -166,10 +102,7 @@ class ZoneRuntime:
         await instance.connect()
 
     async def connect_all(self, categories: set[DeviceCategory] | None = None) -> dict[str, bool]:
-        """(Re)connects every configured instance -- what CONNECT_ZONE now
-        means, since instances already connect at add-time. Filtering by
-        category lets a partial "just reconnect the lights" retry happen
-        without touching everything else."""
+        """(Re)connects every configured instance; filtering by category allows a partial retry (e.g. just the lights)."""
         results: dict[str, bool] = {}
         for instance_id, instance in self.driver_instances.items():
             if categories and self.instance_categories.get(instance_id) not in categories:
@@ -187,10 +120,7 @@ class ZoneRuntime:
             logger.warning("zone %s: cannot add device %s, unknown instance %s", self.zone_id, device_id, instance_id)
             return False
 
-        # Registered regardless of register_channel's outcome -- same
-        # reasoning as add_driver_instance: a motor not yet reachable on a
-        # shared RTU/TCP bus (or any other not-yet-responsive channel) must
-        # still be remembered, not silently dropped from the configuration.
+        # Registered regardless of register_channel's outcome, same as add_driver_instance: an unreachable channel must still be remembered, not dropped.
         if not await self.driver_instances[instance_id].register_channel(channel):
             logger.warning("zone %s: device %s (channel %s on %s) did not come up, registering anyway",
                            self.zone_id, device_id, channel, instance_id)
@@ -216,11 +146,7 @@ class ZoneRuntime:
         await self.player.stop()
         await self.player.aclose()
         for instance_id, instance in list(self.driver_instances.items()):
-            # Same reasoning as remove_driver_instance: stop the hardware
-            # before tearing down the connection to it, not after -- a
-            # motor or light left running here has no watchdog, no
-            # reconnect, and no way to be reached again once the state
-            # below is cleared.
+            # Same reasoning as remove_driver_instance: stop hardware before tearing down the connection to it.
             try:
                 await instance.emergency_stop()
             except Exception:  # noqa: BLE001
@@ -237,29 +163,7 @@ class ZoneRuntime:
         self.device_last_parameters.clear()
 
     async def emergency_stop(self) -> None:
-        """Must never raise: called from the command handler's error path too.
-
-        Stops the scenario player FIRST, before touching any hardware: it
-        used to only reach the driver instances, leaving the tick loop
-        running underneath. A motor mid-ramp or a valve about to reopen
-        would get force-stopped by this call and then, within one 50ms tick,
-        get re-armed by the next scheduled event the still-running player
-        dispatched right after -- an emergency stop that only lasted until
-        the next tick isn't one. Stopping the player also clears
-        active_devices (the watchdog set), which is correct here: nothing
-        should still be "must be refreshed or force-stopped" once every
-        instance has already been told to stop.
-
-        device_last_parameters is cleared too, for a related reason: those
-        are the values set_global_brightness/_speed re-sends to "live"
-        devices when the operator moves a slider (see _reapply_live_devices).
-        Left in place, the very next slider touch after an E-stop -- an
-        entirely plausible next move, "let me turn the speed down before
-        restarting" -- would silently re-dispatch every motor's/light's
-        LAST pre-stop parameters (e.g. "running at 30Hz") right back to the
-        hardware, with no scenario playing and thus no watchdog to catch it
-        again afterward. An E-stopped device has nothing "live" left to
-        re-apply until a real new command sets it again."""
+        """Must never raise (called from the command handler's error path too). Stops the player before any hardware so a still-ticking scenario can't re-arm a device within the same tick, and clears device_last_parameters so a post-stop slider move can't silently re-dispatch stale pre-stop values."""
         try:
             await self.player.stop()
         except Exception:  # noqa: BLE001
@@ -274,17 +178,7 @@ class ZoneRuntime:
                 logger.exception("zone %s: emergency stop failed for instance %s", self.zone_id, instance_id)
 
     async def reset_motor_fault(self, device_id: str) -> bool:
-        """Clears a tripped VFD fault so the drive accepts run commands
-        again. Deliberately scoped to motor-category devices only -- unlike
-        apply_state (category-agnostic, the driver just interprets whatever
-        shape it gets), a valve/light driver has no fault concept to clear,
-        so this raises for anything else instead of silently no-op'ing on a
-        device that doesn't support it, matching add_device's "unknown
-        instance" -> raise -> Ack(ok=False) precedent in main.py.
-        `getattr(..., None)` rather than a required DriverInstance protocol
-        method: fault reset is meaningful to exactly one driver category
-        today (motor), so it isn't part of the universal contract every
-        valve/light driver would otherwise have to stub out."""
+        """Motor-only: unlike apply_state, a valve/light driver has no fault concept, so this raises rather than silently no-op'ing; uses getattr since fault reset isn't part of every driver's contract."""
         routing = self.device_map.get(device_id)
         if not routing:
             raise RuntimeError(f"unknown device '{device_id}'")
@@ -299,19 +193,7 @@ class ZoneRuntime:
         return await reset_fault(channel)
 
     def set_device_state(self, device_id: str, parameters: dict) -> None:
-        """Manual equivalent of _handle_device_event below -- same routing,
-        same motor-watchdog registration (so a test "run at 10Hz" still
-        gets force-stopped if nothing keeps refreshing it, exactly like a
-        scenario event would), just triggered by an operator clicking a
-        Devices-tab test control instead of the scenario player reaching
-        this device's next scheduled tick. Valve/light state is level-
-        triggered and simply stays as set. Routing/watchdog/global-scaling
-        logic itself lives in _dispatch_device_state, shared with
-        _handle_device_event -- this used to be a second copy of that
-        logic that had quietly fallen out of sync (it never applied
-        global_speed/global_brightness), so an operator running a manual
-        test while SET_GLOBAL_SPEED was active got the raw, unscaled value
-        on the wire instead of what the rest of the zone was seeing."""
+        """Manual equivalent of _handle_device_event, sharing _dispatch_device_state's routing/watchdog/global-scaling so a manual test reflects an active SET_GLOBAL_SPEED/_BRIGHTNESS instead of sending the raw value."""
         if self._dispatch_device_state(device_id, parameters) is None:
             if device_id not in self.device_map:
                 raise RuntimeError(f"unknown device '{device_id}'")
@@ -320,31 +202,12 @@ class ZoneRuntime:
     # -- scheduler callback, injected into ZoneScenarioPlayer -------------------
 
     def _handle_device_event(self, event: Event) -> None:
-        # skip_if_unchanged=True: the player forwards every scenario tick's
-        # event regardless of whether the value changed (a scenario export
-        # repeats each device's last value every ~1s for the whole show,
-        # see data/scenarios/salam.json) -- skipping the actual driver
-        # write here when nothing changed avoids hammering the bus with it.
+        # skip_if_unchanged=True: scenarios repeat each device's last value every tick, so skip the driver write when nothing changed to avoid hammering the bus.
         if self._dispatch_device_state(event.device_id, event.parameters, skip_if_unchanged=True) is None:
             logger.warning("zone %s: event for unregistered device %s", self.zone_id, event.device_id)
 
     def _dispatch_device_state(self, device_id: str, parameters: dict, skip_if_unchanged: bool = False) -> tuple[str, str] | None:
-        """Shared by set_device_state (operator-triggered) and
-        _handle_device_event (scenario-triggered): routing lookup,
-        motor-watchdog registration, and global_speed/global_brightness
-        scaling. Only motors opt into the watchdog: valve/light states are
-        level-triggered (stay in whatever state they were last set to), a
-        running VFD is not -- it must be continuously re-affirmed or
-        ZoneScenarioPlayer's watchdog force-stops it (Step 3 safety net).
-        Returns the (instance_id, channel) routing on success, or None if
-        the device or its instance isn't found -- callers decide how to
-        report that (raise vs. log-and-return).
-
-        skip_if_unchanged only skips the driver write below, never the
-        watchdog refresh above it -- set_device_state/_reapply_live_devices
-        keep the default False since a manual test-fire must always write,
-        and _reapply_live_devices exists specifically to re-send an
-        "unchanged" value through a just-changed global multiplier."""
+        """Shared routing/watchdog/scaling for operator- and scenario-triggered writes. Only motors register with the watchdog, since valve/light state is level-triggered but a running VFD must be continuously re-affirmed or force-stopped. skip_if_unchanged only skips the driver write, never the watchdog refresh, so _reapply_live_devices can still re-send an unchanged value through a just-changed multiplier."""
         routing = self.device_map.get(device_id)
         if not routing:
             return None
@@ -355,9 +218,7 @@ class ZoneRuntime:
 
         category = self.device_categories.get(device_id)
         parameters = dict(parameters)
-        # Compared against BELOW, then overwritten -- this is the BASE
-        # (unscaled) value set_global_brightness/_speed re-derives from,
-        # and what skip_if_unchanged diffs the new event against.
+        # BASE (unscaled) value: what _reapply_live_devices re-derives from and what skip_if_unchanged diffs against.
         previous = self.device_last_parameters.get(device_id)
         self.device_last_parameters[device_id] = dict(parameters)
 

@@ -1,8 +1,4 @@
-"""
-Async pub/sub replacing pyqtSignal. Hardware modules and the scenario player
-call `bus.publish(event)` without knowing who — if anyone — is listening.
-Each WebSocket connection subscribes its own queue and forwards to its client.
-"""
+"""Async pub/sub: publishers don't know who (if anyone) is listening; each WebSocket connection gets its own forwarding queue."""
 from __future__ import annotations
 
 import asyncio
@@ -31,8 +27,7 @@ class EventBus:
             try:
                 q.put_nowait(event)
             except asyncio.QueueFull:
-                # A slow/stuck client must never block hardware control flow.
-                # Drop the oldest queued event for that client and retry once.
+                # A slow/stuck client must never block hardware control flow, so drop its oldest queued event and retry once.
                 try:
                     q.get_nowait()
                     q.put_nowait(event)

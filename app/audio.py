@@ -1,21 +1,4 @@
-"""
-Background music playback for a zone's show -- runs on the same machine that
-drives the hardware, because audio and light/water timing share one clock
-(ZoneScenarioPlayer's tick loop). A playback host on a different machine over
-a network could never guarantee that sync.
-
-This is a DIFFERENT concern from the future timeline editor's waveform
-display: that decodes and renders audio entirely in the browser via the Web
-Audio API, no daemon involved -- authoring a scenario doesn't need this
-module at all, only playing one back does.
-
-Replaces the original's PyQt6 QMediaPlayer (managers/audio.py) with
-pygame.mixer.music: no GUI dependency, ships its own SDL2 audio backend via
-pip (nothing extra to install on the target machine, unlike e.g. python-vlc
-which needs VLC present). All SDL calls are synchronous, so every method
-here runs them via run_in_executor -- a slow codec load or seek must not
-stall the same event loop that's driving relays/VFDs on a 50ms tick.
-"""
+"""Runs in-process (not over a network) so playback shares ZoneScenarioPlayer's tick clock with the hardware; all pygame.mixer/SDL calls are synchronous, so every method here uses run_in_executor to avoid stalling the 50ms relay/VFD tick loop."""
 from __future__ import annotations
 
 import asyncio
@@ -38,15 +21,7 @@ def _ensure_mixer() -> None:
 class AudioPlayer:
     def __init__(self) -> None:
         self._loaded_file: str | None = None
-        # SDL_mixer's own calls aren't documented as safe to call
-        # concurrently from two threads -- every method here dispatches to
-        # the SAME shared executor thread pool (run_in_executor(None, ...)),
-        # so without serializing them, e.g. a loop-triggered play() and an
-        # operator-triggered stop() issued around the same moment could
-        # both be mid-call on pygame.mixer.music at once. The lock doesn't
-        # decide which one "wins" (that's ZoneScenarioPlayer's job -- see
-        # its loop-wrap restart re-checking is_playing after this awaits),
-        # it just guarantees they never actually overlap at the SDL level.
+        # Serializes calls into SDL_mixer (not documented thread-safe) across the shared executor pool; doesn't decide play/stop precedence -- that's ZoneScenarioPlayer's job.
         self._lock = asyncio.Lock()
 
     async def load(self, file_path: str) -> bool:
@@ -72,11 +47,7 @@ class AudioPlayer:
             try:
                 pygame.mixer.music.play()
             except pygame.error as exc:
-                # Matches load()/seek()'s stance: a device hiccup here must
-                # not take the whole scenario tick loop down with it (see
-                # scenario_player.py's loop-wrap restart, the one caller
-                # that runs on every lap of a looping show, not just once
-                # at playback start).
+                # A hiccup here must not crash the tick loop (see scenario_player.py's loop-wrap restart, which calls this every lap).
                 logger.warning("failed to (re)start music playback: %s", exc)
 
         async with self._lock:
@@ -102,9 +73,7 @@ class AudioPlayer:
             try:
                 pygame.mixer.music.set_pos(position)
             except pygame.error as exc:
-                # Not every format supports seeking via SDL_mixer (MP3 seek
-                # support in particular varies by build) -- log and move on
-                # rather than let a scrub attempt take the daemon down.
+                # Not every format supports seeking via SDL_mixer (MP3 varies by build); log and move on rather than crash on a scrub attempt.
                 logger.warning("seek to %.2fs not supported for this file: %s", position, exc)
 
         async with self._lock:

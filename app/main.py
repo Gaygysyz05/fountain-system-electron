@@ -1,16 +1,4 @@
-"""
-FastAPI daemon entrypoint. Replaces PyQt6's ZoneFountainEditor/SuperPlayer event
-loop and api_server.py's Flask thread with a single ASGI app on one asyncio
-event loop: one WebSocket for commands in + status/events out, plus a couple of
-read-only REST endpoints for things that are naturally request/response.
-
-Error-handling stance (per the brief): a malformed command, an unknown zone, or
-a hardware exception must produce an Ack(ok=False) or a HardwareErrorEvent on
-the bus -- never an unhandled exception that kills the WS connection or the
-process. The only things allowed to actually crash the daemon are bugs in this
-file's own control flow, not anything reachable from client input or a flaky
-Modbus link.
-"""
+"""FastAPI ASGI daemon (one WS for commands/events, a few REST endpoints); client input or a flaky Modbus link must always yield Ack(ok=False)/HardwareErrorEvent, never an unhandled exception that kills the WS or process."""
 from __future__ import annotations
 
 import asyncio
@@ -53,12 +41,7 @@ _SCHEDULE_CHECK_INTERVAL_S = 20.0
 
 
 async def _check_schedule() -> None:
-    """Runs every _SCHEDULE_CHECK_INTERVAL_S; a schedule entry fires once
-    the wall clock matches its `time` on a day it's due, tracked via
-    last_fired_date so it can't double-fire within the same matching
-    minute (several checks wide at this interval) -- see
-    ScheduleEntryDto's docstring for why a missed time is skipped, not
-    caught up on, if the daemon was down."""
+    """last_fired_date guards against double-firing within the same matching minute at this poll interval; a missed time (daemon was down) is skipped, not caught up -- see ScheduleEntryDto."""
     entries = await persistence.load_schedule()
     now = datetime.now()
     today = now.strftime("%Y-%m-%d")
@@ -100,15 +83,7 @@ async def _schedule_loop() -> None:
 
 
 async def _emergency_stop_all_zones() -> None:
-    """A daemon shutdown -- whether the operator closes the HMI mid-show, the
-    process is killed to be restarted, or anything else -- used to do
-    NOTHING to the hardware: no zone's emergency_stop() was ever called, so
-    a valve/motor/light left running when this exits stayed exactly as it
-    was, unattended, since the watchdog and everything else keeping it in
-    check dies right along with this process. Better to force everything
-    off on the way out than to abandon it running. Called from lifespan's
-    own shutdown (below) AND from POST /shutdown (see its own docstring for
-    why the HTTP path exists separately)."""
+    """Forces every zone off on any daemon exit, since the watchdog and everything else guarding the hardware dies with this process; called from both lifespan shutdown and POST /shutdown (see its docstring)."""
     if not zones:
         return
     logger.info("emergency-stopping %d zone(s)", len(zones))
@@ -116,13 +91,7 @@ async def _emergency_stop_all_zones() -> None:
 
 
 async def _connect_pending_instances(pending: list[tuple[int, str, DriverInstance]]) -> None:
-    """Connects every instance persistence.load_installation registered
-    (but deliberately didn't dial out for) concurrently, in the
-    background -- see that function's docstring for why this doesn't
-    happen inline in lifespan. Each instance's own driver already
-    publishes a HardwareErrorEvent/ConnectionStateEvent on failure (see
-    e.g. modbus_valve.py's connect()), so this only adds a startup-scoped
-    log line, not a second error-reporting path."""
+    """Connects instances persistence.load_installation registered but didn't dial out for, concurrently in the background (see that docstring); drivers already publish HardwareErrorEvent/ConnectionStateEvent on failure, so this only adds a startup log line."""
     if not pending:
         return
     results = await asyncio.gather(*(instance.connect() for _, _, instance in pending), return_exceptions=True)
@@ -139,26 +108,13 @@ async def _connect_pending_instances(pending: list[tuple[int, str, DriverInstanc
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     pending_connects = await persistence.load_installation(get_zone)
-    # Connecting to hardware happens concurrently in the background, not
-    # awaited here -- see persistence.load_installation's docstring: an
-    # unreachable/slow board used to block the ENTIRE ASGI server --
-    # including the HMI's own WS handshake -- from accepting connections
-    # until every configured instance had connected or timed out, one
-    # after another, sometimes ten-plus seconds on an install with several
-    # boards and nothing plugged in yet.
+    # Not awaited here: an unreachable/slow board would otherwise block the whole ASGI server (incl. the HMI's WS handshake) until every instance connected or timed out.
     connect_task = asyncio.create_task(_connect_pending_instances(pending_connects))
     schedule_task = asyncio.create_task(_schedule_loop())
     yield
     connect_task.cancel()
     schedule_task.cancel()
-    # Await both cancellations rather than firing and moving straight on --
-    # otherwise either can still be mid-flight (the schedule loop
-    # specifically mid `await zone.player.play()`) when cancel() returns,
-    # and only actually stop a few event-loop turns later. Racing that
-    # against _emergency_stop_all_zones() below risked a delayed connect()
-    # or the scheduler re-arming a zone's player right as shutdown was
-    # telling its driver instances to stop -- an emergency stop that gets
-    # silently undone a moment later.
+    # Must await both cancellations before _emergency_stop_all_zones(): either task can still be mid-flight after cancel() returns, and could otherwise re-arm a zone right as it's being stopped.
     with suppress(asyncio.CancelledError):
         await connect_task
     with suppress(asyncio.CancelledError):
@@ -168,24 +124,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Fountain Control Daemon", lifespan=lifespan)
 
-# The daemon only ever listens on 127.0.0.1 (see config.py), but that stops
-# the network, not a browser tab: any website open on this machine can also
-# reach 127.0.0.1:8765, so a wildcard CORS origin would let ANY page's JS read
-# /zones, /scenarios and arbitrary local files off /audio. Only two origins
-# are ever a legitimate renderer: electron-vite's dev server
-# (http://localhost:5173, a different origin than the daemon's own
-# 127.0.0.1:8765 as far as fetch() is concerned) and "null" -- what a packaged
-# Electron build's file:// page sends as Origin. See config.ALLOWED_ORIGINS
-# (also used to reject the WS handshake itself below, since WebSocket isn't
-# subject to CORS at all).
-#
-# allow_methods must cover every verb the REST surface actually uses, not
-# just GET -- POST /scenarios/{id} (timeline Save) and DELETE /scenarios/{id}
-# (timeline Delete) are non-simple cross-origin requests (JSON body), so the
-# browser sends a preflight OPTIONS first and blocks the real request if the
-# method isn't in this list. Restricting this to "GET" silently broke saving
-# and deleting scenarios from the HMI while every read-only screen kept
-# working, which is why it went unnoticed.
+# 127.0.0.1 binding stops the network, not a local browser tab -- CORS must be restricted to config.ALLOWED_ORIGINS (also used for the WS handshake below, which CORS itself doesn't cover) and allow_methods must include non-GET verbs or preflight silently breaks Save/Delete while read-only screens keep working.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=config.ALLOWED_ORIGINS,
@@ -201,25 +140,14 @@ async def health() -> dict:
 
 @app.post("/shutdown")
 async def shutdown() -> dict:
-    """Called by the Electron shell right before it kills this process.
-    HTTP, not an OS signal: Node's ChildProcess.kill() on Windows doesn't
-    reliably give asyncio's own signal handlers -- which lifespan's
-    shutdown depends on -- any chance to run, so the emergency-stop that
-    normally happens on ASGI shutdown could otherwise be skipped entirely
-    on the one platform this actually ships to. The process still gets
-    killed by the caller right after this returns; this only guarantees
-    that happens with the hardware already off rather than mid-command."""
+    """Called by the Electron shell before it kills this process: on Windows, ChildProcess.kill() doesn't reliably let asyncio's signal handlers (which lifespan shutdown depends on) run, so this guarantees hardware is off before that kill lands."""
     await _emergency_stop_all_zones()
     return {"status": "ok"}
 
 
 @app.get("/zones")
 async def get_zones() -> list[dict]:
-    """Read-only snapshot of every zone's current configuration -- what
-    driver instances exist and what devices are mapped onto them. The HMI
-    fetches this on connect/reconnect to rehydrate its device-config screen
-    from the daemon (the source of truth) instead of only knowing about
-    whatever it itself has sent commands for this session."""
+    """The HMI fetches this on connect/reconnect to rehydrate its device-config screen from the daemon, the source of truth, rather than only what it sent this session."""
     result = []
     for zone_id, zone in zones.items():
         instances = [
@@ -243,11 +171,7 @@ async def get_zones() -> list[dict]:
         ]
         result.append({
             "zone_id": zone_id, "name": zone.name, "driver_instances": instances, "devices": devices,
-            # Round-tripped so the HMI's live-control sliders can show
-            # what the daemon actually has right now on load/reconnect,
-            # rather than always assuming 100% -- these are runtime-only
-            # (never persisted), so this GET is the only way to learn the
-            # current value after a page reload or a second client connecting.
+            # Runtime-only, never persisted -- this GET is the only way for the HMI's sliders to learn the current value on reload/reconnect instead of assuming 100%.
             "global_brightness": round(zone.global_brightness * 100),
             "global_speed": round(zone.global_speed * 100),
         })
@@ -256,11 +180,7 @@ async def get_zones() -> list[dict]:
 
 @app.get("/drivers")
 async def get_drivers() -> list[dict]:
-    """Read-only lookup, same rationale as /health -- a stateless list the
-    HMI's device-config form renders from, not something that belongs on the
-    WS command channel. `config_schema` is the driver's Pydantic config model
-    as JSON Schema, so the frontend can build the config form dynamically
-    instead of hardcoding fields per driver type."""
+    """`config_schema` is the driver's Pydantic config model as JSON Schema, so the frontend can build the config form dynamically instead of hardcoding fields per driver type."""
     return [
         {
             "driver_type": d.driver_type,
@@ -280,8 +200,7 @@ async def get_scenarios() -> list[dict]:
 
 @app.get("/scenarios/{scenario_id}")
 async def get_scenario(scenario_id: str) -> dict:
-    """Full content for the timeline UI to edit -- GET reads exactly what
-    POST (below) writes."""
+    """Full content for the timeline UI to edit -- GET reads exactly what POST (below) writes."""
     try:
         return await persistence.read_scenario_raw(scenario_id)
     except ValueError as exc:
@@ -292,14 +211,7 @@ async def get_scenario(scenario_id: str) -> dict:
 
 @app.get("/audio")
 async def get_audio(path: str) -> FileResponse:
-    """Serves a music_file's raw bytes so the timeline UI can decode it
-    client-side (Web Audio API) and draw a waveform -- see the daemon-plays
-    vs. browser-draws split from the audio architecture discussion. This is
-    not a new capability the daemon didn't already have: it already reads
-    and plays this exact file (app/audio.py); this just lets the browser
-    read the same bytes. Same path resolution as playback (resolve_music_path),
-    so a relative path here means the same file it would when actually played.
-    """
+    """Serves a music_file's raw bytes for the timeline UI to decode client-side (Web Audio API) and draw a waveform; uses the same path resolution as playback so a relative path means the same file that actually plays."""
     try:
         resolved = persistence.resolve_music_path(path)
     except ValueError as exc:
@@ -311,9 +223,7 @@ async def get_audio(path: str) -> FileResponse:
 
 @app.post("/scenarios/{scenario_id}")
 async def put_scenario(scenario_id: str, payload: persistence.ScenarioFileDto) -> dict:
-    """The timeline UI's save action. Plain file write, not a WS command --
-    same reasoning as GET /scenarios: this is CRUD on a file, not a runtime
-    hardware mutation, so it belongs on the REST side."""
+    """Plain file write, not a WS command -- this is CRUD on a file, not a runtime hardware mutation."""
     try:
         await persistence.save_scenario(scenario_id, payload)
     except ValueError as exc:
@@ -323,12 +233,7 @@ async def put_scenario(scenario_id: str, payload: persistence.ScenarioFileDto) -
 
 @app.delete("/scenarios/{scenario_id}")
 async def delete_scenario(scenario_id: str) -> dict:
-    """The timeline UI's delete action -- there was previously no way to
-    remove an old/test scenario file short of editing data/scenarios/ by
-    hand. A currently-playing scenario is unaffected: PLAY_SCENARIO reads
-    the file once at play-start into an in-memory Project (load_scenario),
-    it doesn't keep re-reading the file, so deleting it mid-playback can't
-    interrupt a running show."""
+    """A currently-playing scenario is unaffected: PLAY_SCENARIO reads the file once at play-start into an in-memory Project and never re-reads it, so deleting it mid-playback can't interrupt a running show."""
     try:
         await persistence.delete_scenario(scenario_id)
     except ValueError as exc:
@@ -357,10 +262,7 @@ async def update_schedule_entry(entry_id: str, payload: persistence.ScheduleEntr
     entries = await persistence.load_schedule()
     for i, entry in enumerate(entries):
         if entry.id == entry_id:
-            # exclude_unset -- a field the client didn't send must keep its
-            # current value, not get reset to the Update DTO's own default
-            # (e.g. omitting `enabled` would otherwise silently re-enable a
-            # disabled entry, since bool defaults to True).
+            # exclude_unset: a field the client omitted must keep its current value, not reset to the DTO's default (e.g. bool `enabled` defaulting to True would silently re-enable a disabled entry).
             updated = entry.model_copy(update=payload.model_dump(exclude_unset=True))
             entries[i] = updated
             await persistence.save_schedule(entries)
@@ -385,15 +287,7 @@ async def get_audit_log(limit: int = 200) -> list[dict]:
 
 @app.websocket(config.WS_PATH)
 async def ws_endpoint(websocket: WebSocket) -> None:
-    # CORS (above) doesn't apply to WebSocket at all, so without this check
-    # any website open in a browser on this machine could connect straight to
-    # the hardware-control channel with nothing but
-    # `new WebSocket("ws://127.0.0.1:8765/ws")` and send EMERGENCY_STOP,
-    # PLAY_SCENARIO, SET_DEVICE_STATE, etc. A real browser always sends
-    # Origin on a cross-origin WS handshake, so reject anything that sends
-    # one we don't recognize; a missing Origin (a non-browser tool -- direct
-    # test scripts, wscat) is let through, since blocking that would need
-    # real auth, which is a separate, bigger change than closing this hole.
+    # CORS doesn't cover WebSocket at all, so without this any local browser tab could open this hardware-control socket directly; a missing Origin (non-browser tools) is let through since blocking it would need real auth.
     origin = websocket.headers.get("origin")
     if origin is not None and origin not in config.ALLOWED_ORIGINS:
         logger.warning("rejected WS connection from disallowed origin: %s", origin)
@@ -420,14 +314,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
     tasks = [asyncio.create_task(reader()), asyncio.create_task(writer()), asyncio.create_task(heartbeat())]
     try:
-        # asyncio.wait() never raises a task's exception -- it just returns
-        # once one finishes, successfully or not -- so the `except
-        # WebSocketDisconnect` this used to have here was dead code: a
-        # normal disconnect finishes reader() by raising inside that task,
-        # not out of this await. Pulling each done task's result surfaces
-        # WebSocketDisconnect (routine, not logged) vs. an actual bug in
-        # reader/writer/heartbeat (logged -- previously silent apart from
-        # asyncio's own "exception was never retrieved" stderr line).
+        # asyncio.wait() never raises a task's exception, so each done task's result must be pulled explicitly to tell a routine WebSocketDisconnect from an actual bug worth logging.
         done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             exc = task.exception()
@@ -459,14 +346,7 @@ async def _handle_incoming(websocket: WebSocket, raw: str) -> None:
 
 
 async def _send_ack(websocket: WebSocket, ack: Ack) -> None:
-    """A slow command (EMERGENCY_STOP retrying unresponsive hardware can take
-    several hundred ms) can outlive the client's connection -- this used to
-    send the ok=True Ack unconditionally, and on failure (client already
-    gone) fall into the except block above, which tried to send a SECOND
-    Ack that failed the exact same way, except uncaught: it silently killed
-    the reader task and, with it, this connection's writer/heartbeat too.
-    The command itself already ran either way; there's just no one left to
-    tell, which isn't this connection's problem anymore."""
+    """A slow command can outlive the client's connection; swallowing the send failure here (rather than letting it raise) avoids killing the reader task and, with it, this connection's writer/heartbeat."""
     try:
         await websocket.send_text(ack.model_dump_json())
     except Exception:  # noqa: BLE001
@@ -496,12 +376,7 @@ async def _dispatch(cmd) -> None:  # noqa: ANN001 - discriminated union, see app
 
         case "ADD_DRIVER_INSTANCE":
             zone = get_zone(cmd.zone_id)
-            # Registers regardless of whether this connect attempt succeeds
-            # (see zone_runtime.py) -- connect failure surfaces as a
-            # HardwareErrorEvent on the bus, not as a failed Ack, since
-            # configuring hardware before it's reachable is normal setup,
-            # not a command error. An unknown driver_type still raises
-            # (KeyError from the registry), which IS a real config mistake.
+            # Registers even if connect fails (reported via HardwareErrorEvent, not a failed Ack) since configuring unreachable hardware is normal setup; an unknown driver_type still raises as a real config mistake.
             await zone.add_driver_instance(cmd.instance_id, cmd.driver_type, cmd.config)
             await persistence.save_installation(zones)
 
@@ -556,13 +431,7 @@ async def _dispatch(cmd) -> None:  # noqa: ANN001 - discriminated union, see app
             await asyncio.gather(*(z.emergency_stop() for z in targets))
 
         case "RECONNECT_INSTANCE":
-            # get_zone() would silently CREATE a fresh, empty zone for a
-            # typo'd/stale zone_id here -- unlike CONNECT_ZONE et al. above,
-            # there is no legitimate "first time we've heard of this zone"
-            # case for a reconnect, so that zombie zone would just sit in
-            # `zones` forever, showing up in GET /zones with nothing in it.
-            # A missing zone is a real error for this command, not a no-op
-            # (that would swallow the mistake) and not something to create.
+            # Unlike CONNECT_ZONE et al., there's no legitimate "first time we've heard of this zone" case here, so get_zone() would silently create a permanent zombie zone for a typo'd/stale zone_id.
             if cmd.zone_id not in zones:
                 raise RuntimeError(f"unknown zone {cmd.zone_id}")
             await zones[cmd.zone_id].reconnect_instance(cmd.instance_id)

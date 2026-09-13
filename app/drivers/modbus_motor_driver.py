@@ -1,14 +1,4 @@
-"""Driver adapter: an RTU/TCP gateway serving one or more DGI900-style VFD
-inverters on a shared RS485 bus, wrapping AsyncInverterManager.
-
-One instance = one gateway (host:port), NOT one motor -- corrected after
-confirming the real deployment (DegDrive DGI900 inverters behind an
-RTU/TCP converter). `channel` is the inverter's Modbus slave/unit ID as a
-string; each channel gets registered (and does its own comm-source bring-up)
-via `register_channel`, called once when ADD_DEVICE first maps a device_id
-onto it -- unlike the valve/light drivers, a motor channel needs real setup
-before it responds to anything, it isn't just a number that's always valid.
-"""
+"""RTU/TCP gateway wrapping AsyncInverterManager for multiple DGI900 inverters on one shared RS485 bus; one instance = one gateway (not one motor), and each channel (Modbus slave ID) needs register_channel bring-up before it responds, unlike valve/light channels."""
 from __future__ import annotations
 
 from typing import Any
@@ -35,10 +25,7 @@ class ModbusMotorGatewayDriver:
         self._next_motor_id = 1  # internal bookkeeping id for AsyncInverterManager, distinct from slave_id
 
     async def connect(self) -> bool:
-        """Nothing to do at the gateway level yet -- the shared TCP link is
-        established lazily by AsyncInverterManager as soon as the first
-        motor is registered via register_channel. A gateway with zero
-        motors configured has nothing to connect to."""
+        """Lazy: the shared TCP link is established by AsyncInverterManager on the first register_channel call, not here."""
         return True
 
     async def disconnect(self) -> None:

@@ -1,16 +1,4 @@
-"""Driver adapter: direct RGB over Art-Net (EightOutputLEDController from the
-original codebase), wrapping AsyncArtNetController. `channel` is the
-universe/output number, "0".."7" (the Node8 numbers its 8 outputs from zero).
-
-This is the ONE light driver with real reference code behind it. The
-DMX-decoder + RGB-amplifier rig mentioned in the architecture discussion is a
-different addressing/protocol story (decoder channel maps, amplifier
-mapping) that needs real specs before it can be written -- register it here
-as `dmx_decoder_rgb_amplifier_light` once that hardware is in hand, following
-this file as the template. Nothing else in the system needs to change to add
-it: the registry, ZoneRuntime, and the WS protocol are already generic over
-`category=LIGHT`.
-"""
+"""Direct RGB over Art-Net, wrapping AsyncArtNetController; `channel` is "0".."7" since the Node8 numbers its 8 outputs from zero."""
 from __future__ import annotations
 
 from typing import Any
@@ -47,19 +35,14 @@ class ArtNetLightDriver:
         return self._controller.is_connected()
 
     async def register_channel(self, channel: str) -> bool:
-        """The Node8 (confirmed hardware: CR061SA) has 8 fixed outputs,
-        numbered 0-7 -- nothing to bring up per-channel, just validate the
-        number is real."""
+        """Node8 has 8 fixed outputs (0-7); nothing to bring up per-channel, just validate the number is real."""
         try:
             return 0 <= int(channel) <= 7
         except ValueError:
             return False
 
     def apply_state(self, channel: str, state: dict[str, Any]) -> None:
-        # AsyncArtNetController numbers its outputs 1-8 internally (ported
-        # as-is from the original working EightOutputLEDController) -- the
-        # +1 here is the one place that translates our 0-7 user-facing
-        # universe number into that.
+        # AsyncArtNetController numbers outputs 1-8 internally; +1 translates our 0-7 user-facing number into that.
         self._controller.update_led(int(channel) + 1, state.get("r", 0), state.get("g", 0), state.get("b", 0))
 
 

@@ -1,12 +1,4 @@
-"""
-Async rewrite of hardware/artnet_controller.py (EightOutputLEDController).
-
-This module needed the least surgery in the whole codebase: it was already
-framework-agnostic raw-UDP code with no PyQt6 dependency. The only change is
-swapping its private `threading.Thread` fader loop for an `asyncio.Task`, so
-it shares the daemon's single event loop instead of running on its own OS
-thread. UDP sendto() is effectively non-blocking, so no executor is needed.
-"""
+"""Async rewrite of the old threading-based Art-Net controller; UDP sendto() is non-blocking, so the fader loop runs as a plain asyncio.Task with no executor needed."""
 from __future__ import annotations
 
 import asyncio
@@ -71,16 +63,7 @@ class AsyncArtNetController:
             self._sock = None
 
     def update_led(self, led_num: int, r: int, g: int, b: int) -> bool:
-        """Sets a target color; the fader task eases toward it. Non-blocking.
-
-        Clamped to a DMX byte (0-255): nothing upstream validates r/g/b (a
-        scenario event or SET_DEVICE_STATE's `parameters` is an opaque
-        dict), and an out-of-range or non-integer value here doesn't fail
-        loudly -- the fader eases current_colors toward it and eventually
-        reaches it exactly, then _send_current_buffer's `bytes(dmx_data)`
-        raises ValueError deep inside this fire-and-forget _fader_task,
-        killing it silently. That instance would then never send another
-        Art-Net packet until reconnected or the daemon restarts."""
+        """Values are clamped here because unvalidated r/g/b would otherwise eventually reach _send_current_buffer's bytes(dmx_data) and raise, silently killing the fire-and-forget fader task until reconnect."""
         if led_num not in self.target_colors:
             return False
         self.target_colors[led_num] = [_clamp_dmx_byte(r), _clamp_dmx_byte(g), _clamp_dmx_byte(b)]
@@ -91,17 +74,7 @@ class AsyncArtNetController:
             self.target_colors[i] = [0, 0, 0]
 
     async def emergency_stop(self) -> None:
-        """all_off() only moves the fade TARGET to black -- actual blackout
-        still depends on _fader_loop easing current_colors down over its own
-        60fps ticks, roughly 0.5-0.7s from a fully-on color given
-        SMOOTH_SPEED's geometric decay. That's fine for a normal "lights
-        off" but not for an emergency stop, where the whole point is that
-        the hardware reaches a safe state the instant this call returns.
-        So both current_colors and target_colors are snapped to black
-        directly (no easing to interrupt -- there's nothing left to ease
-        toward) and the zero DMX frame is sent synchronously right here,
-        instead of leaving it to whatever the fader task happens to be
-        mid-step on at the moment this is called."""
+        """Unlike all_off(), snaps colors to black and sends synchronously here rather than via the fader loop, so the hardware reaches a safe state the instant this call returns (fader easing would take ~0.5-0.7s)."""
         for i in UNIVERSES:
             self.current_colors[i] = [0.0, 0.0, 0.0]
             self.target_colors[i] = [0, 0, 0]

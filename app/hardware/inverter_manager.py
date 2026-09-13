@@ -1,46 +1,4 @@
-"""
-Async rewrite of hardware/inverter_manager.py (InverterManager).
-
-CORRECTED TWICE after confirming the real deployment: DegDrive DGI900
-inverters behind an RTU/TCP converter, i.e. N inverters on ONE RS485 bus
-bridged to ONE TCP endpoint by a gateway that typically accepts a single
-connection.
-
-First correction: this manager now owns exactly ONE AsyncModbusTcpClient for
-the whole gateway (host:port), shared by every AsyncInverterController it
-creates (see modbus_inverter.py) -- never one socket per motor, unlike an
-earlier revision that assumed each motor had its own independent link.
-
-Second correction, caught by actually testing the first fix: naively
-serializing ALL work for the whole gateway through one consumer task (so
-motor B's command waits for motor A's ENTIRE ramp, sleeps and all, not just
-its wire transactions) reintroduces the exact head-of-line blocking Step 3
-was written to avoid. The real physical constraint is narrower than "only
-one thing can happen on this gateway at a time" -- it's "only one Modbus
-transaction can be in flight at a time." A ramp's `asyncio.sleep()` between
-steps is idle bus time; another motor's transaction can happen during it.
-
-So: back to one coalescing queue + one consumer task PER MOTOR (independent
-ramps, no head-of-line blocking across motors), but every
-AsyncInverterController sharing this gateway also shares ONE `asyncio.Lock`
-(`_bus_lock`, created here, handed to each controller), acquired only around
-the actual read/write call in modbus_inverter.py -- narrow enough to let
-concurrent ramps interleave freely and only briefly contend for the wire at
-the moment each one actually needs it.
-
-STEP 3 SAFETY INTERLOCK -- ramp-up/ramp-down (unchanged reasoning):
-
-The original always wrote the target frequency in one shot and relied
-entirely on the drive's own internal accel/decel parameters to avoid a
-mechanical shock. `_apply_frequency` below steps the setpoint toward the
-target at a configurable max Hz/sec instead, independent of whatever the
-drive is configured to do -- defense in depth, not a replacement for correct
-P-param tuning. The ramp is interruptible: if a newer command for the same
-motor has already been coalesced in, the ramp bails so the consumer can pick
-up the fresher target immediately. A real STOP still goes through the
-drive's own decel-stop command (CMD_DECEL_STOP) unchanged. EMERGENCY_STOP
-bypasses all queueing and ramping, as it must.
-"""
+"""Shares one AsyncModbusTcpClient per gateway (the RTU/TCP bridge accepts only one connection) across all motors; each motor has its own queue+consumer task, coordinated only by a shared `asyncio.Lock` scoped tightly around each wire transaction (not whole ramps) so independent ramps never head-of-line-block each other. `_apply_frequency` ramps toward the target at a configurable max Hz/sec as defense in depth beyond the drive's own accel/decel params, and bails early if a newer command was coalesced in; EMERGENCY_STOP bypasses all queueing and ramping."""
 from __future__ import annotations
 
 import asyncio
@@ -166,20 +124,14 @@ class AsyncInverterManager:
         return self._enqueue(slave_id, ("stop", None))
 
     async def execute_motor_event_immediate(self, slave_id: int, event_params: dict) -> bool:
-        """Bypasses the queue and awaits the result directly -- the async
-        equivalent of the original's result_holder/poll-loop hack, which
-        existed only to bridge a background thread back to a synchronous
-        caller. Not needed here: the caller can just await us."""
+        """Bypasses the queue and awaits the result directly -- no thread-bridging hack needed since the caller can just await us."""
         controller = self.inverters.get(slave_id)
         if not controller:
             return False
         return await self._apply_frequency(slave_id, controller, event_params)
 
     async def reset_fault(self, slave_id: int) -> bool:
-        """Bypasses the queue like emergency_stop_all -- a fault reset must
-        not wait behind a stale queued frequency command for a motor that's
-        sitting there faulted precisely because its last command didn't
-        take."""
+        """Bypasses the queue -- a fault reset must not wait behind the stale command that caused the fault in the first place."""
         controller = self.inverters.get(slave_id)
         if not controller:
             return False
@@ -201,9 +153,7 @@ class AsyncInverterManager:
         return True
 
     async def _consumer(self, slave_id: int) -> None:
-        """One task per motor -- independent ramps, no head-of-line blocking
-        across motors. Actual wire safety comes from `_bus_lock` inside
-        modbus_inverter.py, not from serializing here."""
+        """One task per motor for independent ramps; wire safety comes from `_bus_lock` in modbus_inverter.py, not from serializing here."""
         controller = self.inverters[slave_id]
         queue = self._queues[slave_id]
         while True:
@@ -234,8 +184,7 @@ class AsyncInverterManager:
 
         while abs(target - current) > step:
             if queue is not None and not queue.empty():
-                # A fresher target is already queued -- stop stepping toward a stale one
-                # and let the consumer loop re-invoke us with it right away.
+                # A fresher target is already queued -- bail so the consumer re-invokes us with it.
                 return True
             current += step if target > current else -step
             if not await controller.start_forward(current):
@@ -247,25 +196,7 @@ class AsyncInverterManager:
     # -- bulk stop -------------------------------------------------------------
 
     async def emergency_stop_all(self) -> int:
-        """Bypasses every queue -- E-stop must not wait behind a queued
-        frequency command. Safe to run concurrently across motors even
-        though they share a bus: `_bus_lock` inside each controller
-        serializes the actual transactions, so `gather` here just lets
-        Python schedule them, not send them, in parallel.
-
-        Draining the queues below only removes commands that haven't been
-        picked up yet. It does nothing about a consumer that's already
-        inside `_apply_frequency`'s ramp loop -- it dequeued its command
-        before we got here and is now just sleeping between steps, and per
-        that loop's own bail-out condition an EMPTY queue does NOT stop it
-        (only a NEWER queued command does). Left alone, that ramp would
-        keep stepping toward its pre-E-stop target for up to several
-        seconds after this method returns and reports every motor stopped.
-        So each motor's consumer task is cancelled outright to kill any
-        in-flight ramp before we ask the controller for an actual stop, then
-        restarted so the motor keeps accepting commands afterward -- without
-        that restart, a queue with no task reading it would silently
-        swallow every command until the next reconnect."""
+        """Bypasses every queue and cancels each motor's consumer task before stopping it, because an in-flight ramp only bails on a NEWER queued command (not an empty queue) and would otherwise keep stepping toward its pre-E-stop target for seconds after this returns; tasks are restarted after so their queues aren't left with no reader."""
         logger.warning("EMERGENCY stop all motors on %s:%s", self.host, self.port)
         for queue in self._queues.values():
             while not queue.empty():
@@ -317,9 +248,7 @@ class AsyncInverterManager:
                 await asyncio.gather(*(c.read_status() for c in connected), return_exceptions=True)
 
     async def _reconnect_watchdog(self) -> None:
-        """Valves already had this; motors didn't -- a real gap given the
-        confirmed hardware (an RTU/TCP converter, which drops and needs
-        reconnecting like any serial gateway)."""
+        """Needed because the RTU/TCP converter drops and needs reconnecting like any serial gateway."""
         while not self._closing:
             await asyncio.sleep(1.0)
             if self._closing:

@@ -1,22 +1,4 @@
-"""
-Async rewrite of hardware/inverter_controller.py (InverterController).
-
-Register map and comm-source bring-up sequence (P0.03=2, P0.01=9) are copied
-verbatim from the original; those are DGI900-specific drive parameters, not
-something this rewrite should second-guess -- confirmed against real
-hardware (DegDrive DGI900 inverters behind an RTU/TCP converter).
-
-That real-hardware detail is also why this controller does NOT own an
-AsyncModbusTcpClient of its own (an earlier revision did -- wrong). An
-RTU/TCP converter bridges one RS485 bus to ONE TCP endpoint; every inverter
-on that bus is just a different Modbus unit ID over the SAME link. Multiple
-inverters each opening their own TCP socket against a converter that
-typically accepts only one connection is exactly the instability this whole
-rewrite exists to remove. So: the client is owned and connected by
-AsyncInverterManager (one per gateway/host:port) and handed to each
-controller here -- this class only ever borrows it, addressing itself via
-`slave_id` on each call, and never closes it.
-"""
+"""DGI900 register map/comm-source sequence (P0.03=2, P0.01=9) are fixed drive parameters, verified on real hardware; the client is owned by AsyncInverterManager (one per gateway) and only borrowed here because an RTU/TCP converter accepts one TCP connection per RS485 bus, shared by all inverters via `slave_id`."""
 from __future__ import annotations
 
 import asyncio
@@ -85,17 +67,7 @@ class AsyncInverterController:
 
         self._client = client  # shared across every unit on this gateway -- borrowed, never owned or closed here
 
-        # Serializes actual wire transactions across EVERY controller sharing
-        # this gateway (one Lock instance, passed in by AsyncInverterManager)
-        # -- the real one-conversation-at-a-time constraint of a shared RS485
-        # bus. Deliberately scoped tight, around only the read/write call
-        # itself, NOT around ramp sleeps: an earlier version of the manager
-        # serialized whole per-motor operations (including multi-second ramps)
-        # through one consumer, which reintroduced exactly the head-of-line
-        # blocking this architecture exists to avoid -- motor B's command
-        # would wait out motor A's entire ramp. Locking only the transaction
-        # lets independent motors ramp concurrently and only briefly
-        # contend for the wire at the moment each actually sends something.
+        # Shared Lock serializes wire transactions across all controllers on this gateway (one RS485 bus); scoped to only the read/write call, not ramp sleeps, so one motor's ramp can't block another's command.
         self._bus_lock = bus_lock
 
         self._connected = False
@@ -110,8 +82,7 @@ class AsyncInverterController:
     # -- lifecycle ------------------------------------------------------------
 
     async def connect(self) -> bool:
-        """Per-unit bring-up over the (already-connected, shared) TCP link:
-        the physical link itself is AsyncInverterManager's responsibility."""
+        """Per-unit bring-up over the shared TCP link; the link itself is AsyncInverterManager's responsibility."""
         if not self._client.connected:
             self._publish_error(f"shared connection not established (slave {self.slave_id})")
             self._connected = False
@@ -167,18 +138,7 @@ class AsyncInverterController:
             if elapsed < self.min_command_interval:
                 await asyncio.sleep(self.min_command_interval - elapsed)
 
-            # A Modbus *exception response* (result.isError()) means the
-            # drive is alive and answered, it just rejected this one
-            # transaction -- not the same thing as the transport itself
-            # being down. Raising here to route both cases through the
-            # `except` block below (as an earlier version did) would mark
-            # the whole shared-bus connection dead over one rejected write,
-            # which -- on a gateway serving several inverters -- would
-            # needlessly disconnect every other motor on the bus too. Only
-            # a genuine transport failure (timeout/socket error) should
-            # flip `_connected`. See modbus_valve.py's _write_relay for the
-            # same fix, found via a failure-injection test against a fake
-            # relay board that rejects exactly one write.
+            # Only a genuine transport failure (timeout/socket error) should flip `_connected`; a Modbus exception response means the drive answered but rejected this write, and must not disconnect other motors sharing the bus (see modbus_valve.py's _write_relay for the same fix).
             try:
                 async with self._bus_lock:
                     result = await asyncio.wait_for(
@@ -260,9 +220,7 @@ class AsyncInverterController:
         return ok
 
     async def emergency_stop(self) -> bool:
-        """Bypasses the interval throttle and dedup -- directly mirrors the
-        original's rationale: an E-stop must go out even if we just sent a
-        command a moment ago."""
+        """Bypasses the interval throttle and dedup: an E-stop must go out even if a command was just sent."""
         self.last_command = None
         self.last_frequency = None
         if not self._connected or not self._client.connected:
@@ -284,12 +242,7 @@ class AsyncInverterController:
             return False
 
     async def reset_fault(self) -> bool:
-        """Clears a tripped fault (overcurrent, undervoltage, etc.) so the
-        drive accepts run commands again. Bypasses send_command's dedup on
-        purpose: an operator clicking "Reset Fault" always means send it
-        now, not only if it differs from last_command -- going through
-        send_command would silently no-op a second reset attempt after the
-        drive re-trips and CMD_FAULT_RESET was already the last thing sent."""
+        """Bypasses send_command's dedup so a second reset after the drive re-trips isn't silently no-op'd."""
         self.last_command = None
         return await self._write_register(REG_CTRL_WORD, CMD_FAULT_RESET)
 
