@@ -145,6 +145,14 @@ class ResetMotorFault(_CommandBase):
     device_id: str
 
 
+class SetDeviceModelNode(_CommandBase):
+    """Assigns which named node in the zone's 3D preview model (e.g. a Blender-exported nozzle mesh) this device animates -- set from the Preview tab's mapping editor after the device already exists, not part of ADD_DEVICE. `model_node=None` clears it back to unmapped/decorative."""
+    command: Literal["SET_DEVICE_MODEL_NODE"] = "SET_DEVICE_MODEL_NODE"
+    zone_id: int
+    device_id: str
+    model_node: Optional[str] = None
+
+
 Command = Annotated[
     Union[
         ConnectZone,
@@ -166,6 +174,7 @@ Command = Annotated[
         ReconnectInstance,
         SetDeviceState,
         ResetMotorFault,
+        SetDeviceModelNode,
     ],
     Field(discriminator="command"),
 ]

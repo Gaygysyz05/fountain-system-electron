@@ -191,3 +191,41 @@ async def test_load_installation_registers_without_connecting_to_hardware() -> N
         await instance.connect()  # confirm it's a real, connectable instance
         assert instance.is_connected() is True
         await instance.disconnect()
+
+
+async def test_device_model_node_round_trips_through_save_and_load() -> None:
+    """SET_DEVICE_MODEL_NODE (the Preview tab's nozzle-mapping editor)
+    assigns model_node long after the device itself was first configured
+    -- it must survive a daemon restart the same way nozzle_group/
+    nozzle_inverter already do, not just live in memory until the next
+    restart quietly drops it."""
+    async with FakeModbusServer() as server:
+        bus = EventBus()
+        zones: dict[int, ZoneRuntime] = {}
+
+        def get_zone(zone_id: int) -> ZoneRuntime:
+            if zone_id not in zones:
+                zones[zone_id] = ZoneRuntime(zone_id, bus)
+            return zones[zone_id]
+
+        zone = get_zone(1)
+        await zone.add_driver_instance(
+            "rele1", "modbus_relay_valve",
+            {"host": server.host, "port": server.port, "total_channels": 2},
+            connect=False,
+        )
+        assert zone.set_device_model_node("rele1-1", "Farsunka.005") is True
+
+        await persistence.save_installation(zones)
+
+        reloaded: dict[int, ZoneRuntime] = {}
+
+        def get_reloaded_zone(zone_id: int) -> ZoneRuntime:
+            if zone_id not in reloaded:
+                reloaded[zone_id] = ZoneRuntime(zone_id, bus)
+            return reloaded[zone_id]
+
+        await persistence.load_installation(get_reloaded_zone)
+
+        assert reloaded[1].device_model_nodes.get("rele1-1") == "Farsunka.005"
+        assert "rele1-2" not in reloaded[1].device_model_nodes  # unmapped device stays unmapped
