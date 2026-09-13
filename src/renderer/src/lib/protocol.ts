@@ -131,14 +131,6 @@ export interface SetDeviceStateCommand extends CommandBase {
   parameters: Record<string, unknown>;
 }
 
-/** Assigns which named node in the zone's 3D preview model this device animates (see ScenePreview.tsx's mapping editor); model_node=null clears it back to unmapped/decorative. */
-export interface SetDeviceModelNodeCommand extends CommandBase {
-  command: "SET_DEVICE_MODEL_NODE";
-  zone_id: number;
-  device_id: string;
-  model_node?: string | null;
-}
-
 export type Command =
   | ConnectZoneCommand
   | DisconnectZoneCommand
@@ -158,8 +150,7 @@ export type Command =
   | EmergencyStopCommand
   | ReconnectInstanceCommand
   | SetDeviceStateCommand
-  | ResetMotorFaultCommand
-  | SetDeviceModelNodeCommand;
+  | ResetMotorFaultCommand;
 
 // -- Ack: daemon -> renderer, one per command, correlated by id -------------
 
@@ -256,8 +247,6 @@ export interface DeviceDto {
   // Only meaningful for a motor device that's one of a nozzle's two inverters; null/undefined otherwise.
   nozzle_group?: string | null;
   nozzle_inverter?: 1 | 2 | null;
-  // Named node in the zone's 3D preview model this device animates; null/undefined = unmapped/decorative.
-  model_node?: string | null;
 }
 
 export interface ZoneConfigDto {

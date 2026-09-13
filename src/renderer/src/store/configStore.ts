@@ -34,7 +34,6 @@ interface ConfigStore {
     nozzleInverter?: 1 | 2,
   ) => Promise<void>;
   removeDevice: (zoneId: number, deviceId: string) => Promise<void>;
-  setDeviceModelNode: (zoneId: number, deviceId: string, modelNode: string | null) => Promise<void>;
 }
 
 /** Config-time state (infrequent edits) -- refetching GET /zones after every mutation is fine here, unlike zonesStore's high-frequency position/state stream (see zonesStore.ts / lib/livePosition.ts). */
@@ -130,17 +129,6 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
   removeDevice: afterMutation(
     (zoneId: number, deviceId: string) =>
       useConnectionStore.getState().sendCommand({ command: "REMOVE_DEVICE", zone_id: zoneId, device_id: deviceId }),
-    () => get().loadZones(),
-  ),
-
-  setDeviceModelNode: afterMutation(
-    (zoneId: number, deviceId: string, modelNode: string | null) =>
-      useConnectionStore.getState().sendCommand({
-        command: "SET_DEVICE_MODEL_NODE",
-        zone_id: zoneId,
-        device_id: deviceId,
-        model_node: modelNode,
-      }),
     () => get().loadZones(),
   ),
 }));
