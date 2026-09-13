@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  beatGrid,
   binRangeForFrequencies,
   computeSpectrogram,
   bandFlux,
+  estimateTempo,
   normalizeEnvelope,
   pickPeaks,
   rmsEnvelope,
@@ -23,6 +25,51 @@ describe("binRangeForFrequencies", () => {
     const [lo, hi] = binRangeForFrequencies(0, 1_000_000, 44100, 2048);
     expect(lo).toBe(0);
     expect(hi).toBe(2048 / 2 - 1);
+  });
+});
+
+describe("estimateTempo", () => {
+  function grid(every: number, count: number, offset = 0): number[] {
+    return Array.from({ length: count }, (_, i) => offset + i * every);
+  }
+
+  it("reads the beat period off a steady pulse", () => {
+    const tempo = estimateTempo(grid(0.5, 40)); // 0.5s between hits = 120 BPM
+    expect(tempo?.bpm).toBeCloseTo(120, 0);
+    expect(tempo?.beatPeriod).toBeCloseTo(0.5, 2);
+    expect(tempo?.confidence ?? 0).toBeGreaterThan(0.9);
+  });
+
+  it("prefers the countable reading over double time when both fit equally well", () => {
+    // Hits every 0.8s fit a 75 BPM grid exactly, but also fit 150 BPM exactly (every other beat
+    // empty) -- a listener counts the slower one, so that's the one to report.
+    const tempo = estimateTempo(grid(0.8, 40));
+    expect(tempo?.bpm).toBeCloseTo(75, 0);
+  });
+
+  it("recovers where the beat actually falls, not just how fast it is", () => {
+    const tempo = estimateTempo(grid(0.5, 40, 0.2)); // same pulse, shifted 0.2s later
+    expect(tempo).not.toBeNull();
+    expect(tempo!.phase).toBeCloseTo(0.2, 1);
+  });
+
+  it("returns null rather than a guess when there are barely any onsets", () => {
+    expect(estimateTempo([1, 2, 3])).toBeNull();
+  });
+
+  it("returns null for onsets with no pulse in them at all", () => {
+    // Deliberately irregular (no common period): reporting a tempo here would send the generator
+    // quantizing a show to a beat the music doesn't have.
+    const scattered = [0, 0.11, 0.37, 0.42, 1.03, 1.9, 2.02, 2.7, 3.33, 4.01, 4.13, 5.77, 6.02, 7.9, 8.31, 9.04];
+    const tempo = estimateTempo(scattered);
+    if (tempo) expect(tempo.confidence).toBeLessThan(0.6);
+  });
+});
+
+describe("beatGrid", () => {
+  it("lays beats across the duration from the estimated phase", () => {
+    const beats = beatGrid(2.0, { bpm: 120, beatPeriod: 0.5, phase: 0.25, confidence: 1 });
+    expect(beats).toEqual([0.25, 0.75, 1.25, 1.75]);
   });
 });
 

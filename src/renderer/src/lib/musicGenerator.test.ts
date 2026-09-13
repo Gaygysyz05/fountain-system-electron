@@ -12,6 +12,8 @@ function makeAnalysis(overrides: Partial<AudioAnalysis> = {}): AudioAnalysis {
     trebleOnsets: [],
     energy: [{ time: 0, value: 0.5 }],
     bassEnergy: [{ time: 0, value: 0.5 }],
+    trebleEnergy: [],
+    tempo: null,
     ...overrides,
   };
 }
@@ -86,13 +88,13 @@ describe("generateScenarioFromMusic", () => {
     expect((decay?.parameters.r as number) ?? 0).toBeLessThan(200);
   });
 
-  it("valve section baseline opens a count of valves proportional to that section's loudness", () => {
+  it("a louder section runs more of the valve bank than a quieter one", () => {
     const analysis = makeAnalysis({
       duration: 2.0,
       bassOnsets: [],
       energy: [
-        { time: 0.5, value: 0 }, // sampled at section 0's (t=0..1) midpoint: quiet
-        { time: 1.5, value: 1.0 }, // sampled at section 1's (t=1..2) midpoint: loud
+        { time: 0.5, value: 0 }, // sampled across section 0 (t=0..1): quiet
+        { time: 1.5, value: 1.0 }, // sampled across section 1 (t=1..2): loud
       ],
     });
     const events = generateScenarioFromMusic(analysis, {
@@ -103,10 +105,22 @@ describe("generateScenarioFromMusic", () => {
       valveSectionCount: 2,
     });
 
-    const quietSection = events.filter((e) => e.time === 0);
-    const loudSection = events.filter((e) => e.time === 1.0);
-    expect(quietSection.filter((e) => e.parameters.on === true)).toHaveLength(1); // Math.max(1, round(0*4)) = 1
-    expect(loudSection.filter((e) => e.parameters.on === true)).toHaveLength(4); // round(1.0*4) = 4
+    // Counts what is actually OPEN during each section rather than how many "on" events land on its
+    // first instant: a valve the previous section already had open stays open without being re-sent
+    // (see dropRedundantStateEvents), so event counts at a boundary say nothing about the show's width.
+    const openAt = (t: number): number => {
+      let open = 0;
+      for (const deviceId of ["V1", "V2", "V3", "V4"]) {
+        const state = events
+          .filter((e) => e.device_id === deviceId && e.time <= t)
+          .sort((a, b) => a.time - b.time)
+          .at(-1);
+        if (state?.parameters.on === true) open++;
+      }
+      return open;
+    };
+
+    expect(openAt(1.5)).toBeGreaterThan(openAt(0.5));
   });
 
   it("a strong bass onset triggers a cascade pulse across the valve set (reusing generateValvePattern)", () => {

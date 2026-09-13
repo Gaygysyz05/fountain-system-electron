@@ -19,6 +19,14 @@ export interface Spectrogram {
   fftSize: number;
 }
 
+/** A track's underlying pulse. `phase` is where the first beat sits, so beats are at phase + k*beatPeriod; `confidence` is how tightly the onsets actually cluster on that grid (0 = no discernible pulse, ~1 = machine-precise), letting callers fall back to time-based timing rather than trusting a tempo read off an ambient track that hasn't got one. */
+export interface TempoEstimate {
+  bpm: number;
+  beatPeriod: number;
+  phase: number;
+  confidence: number;
+}
+
 export interface AudioAnalysis {
   duration: number;
   sampleRate: number;
@@ -27,6 +35,8 @@ export interface AudioAnalysis {
   trebleOnsets: number[];
   energy: EnvelopePoint[]; // overall loudness, normalized 0-1, smooth (not onset-gated)
   bassEnergy: EnvelopePoint[]; // bass-band loudness, normalized 0-1, smooth
+  trebleEnergy: EnvelopePoint[]; // treble-band loudness, normalized 0-1 -- against bassEnergy this is the track's brightness/timbre balance over time
+  tempo: TempoEstimate | null; // null when no pulse is detectable (ambient, spoken word, too few onsets)
 }
 
 function hannWindow(size: number): Float64Array {
@@ -172,6 +182,53 @@ export function sampleEnvelope(env: EnvelopePoint[], t: number): number {
   return env[lo].value;
 }
 
+const TEMPO_MIN_BPM = 60;
+const TEMPO_MAX_BPM = 180;
+const TEMPO_STEP_BPM = 0.5;
+const TEMPO_MIN_ONSETS = 8;
+const TEMPO_MIN_CONFIDENCE = 0.15;
+
+/** Estimates the beat grid by scoring every candidate tempo on how tightly the onsets cluster around
+ * ITS period, phase-invariantly: each onset becomes a unit vector at angle 2*pi*(t/period), and the
+ * length of their mean is the classic circular concentration (Rayleigh) -- 1 when every onset lands
+ * on the same point of the beat, ~0 when they're scattered. The winning candidate's mean ANGLE then
+ * hands back the phase for free, so no separate beat-tracking pass is needed. Ties go to the slowest
+ * candidate (the loop only replaces on a strict improvement), which keeps the usual octave ambiguity
+ * -- a perfect grid at P is equally perfect at P/2 -- resolving to the human-countable reading rather
+ * than to double time. */
+export function estimateTempo(onsetTimes: number[], minBpm = TEMPO_MIN_BPM, maxBpm = TEMPO_MAX_BPM): TempoEstimate | null {
+  if (onsetTimes.length < TEMPO_MIN_ONSETS) return null;
+
+  let best: TempoEstimate | null = null;
+  for (let bpm = minBpm; bpm <= maxBpm + 1e-9; bpm += TEMPO_STEP_BPM) {
+    const beatPeriod = 60 / bpm;
+    let re = 0;
+    let im = 0;
+    for (const t of onsetTimes) {
+      const angle = 2 * Math.PI * (t / beatPeriod);
+      re += Math.cos(angle);
+      im += Math.sin(angle);
+    }
+    const confidence = Math.hypot(re, im) / onsetTimes.length;
+    if (!best || confidence > best.confidence) {
+      const fraction = (((Math.atan2(im, re) / (2 * Math.PI)) % 1) + 1) % 1;
+      best = { bpm, beatPeriod, phase: fraction * beatPeriod, confidence };
+    }
+  }
+
+  // A track with no real pulse still produces SOME winner; below this it's noise, and a caller acting
+  // on it would be worse off than knowing there's no tempo at all.
+  return best && best.confidence >= TEMPO_MIN_CONFIDENCE ? best : null;
+}
+
+/** Beat timestamps across `duration` for an estimated tempo -- the grid the generator quantizes to. */
+export function beatGrid(duration: number, tempo: TempoEstimate): number[] {
+  const out: number[] = [];
+  const first = tempo.phase % tempo.beatPeriod;
+  for (let t = first; t <= duration + 1e-9; t += tempo.beatPeriod) out.push(Math.round(t * 1000) / 1000);
+  return out;
+}
+
 export function analyzeAudioBuffer(buffer: AudioBuffer): AudioAnalysis {
   const samples = buffer.getChannelData(0); // mono downmix: onset timing/energy don't need stereo detail
   const sampleRate = buffer.sampleRate;
@@ -184,16 +241,20 @@ export function analyzeAudioBuffer(buffer: AudioBuffer): AudioAnalysis {
   const bassFlux = bandFlux(spec.magnitudes, bassLo, bassHi);
   const trebleFlux = bandFlux(spec.magnitudes, trebleLo, trebleHi);
   const bassEnergyRaw = bandEnergy(spec.magnitudes, bassLo, bassHi);
+  const trebleEnergyRaw = bandEnergy(spec.magnitudes, trebleLo, trebleHi);
 
   const frameTimes = Array.from(spec.frameTimes);
+  const onsets = pickPeaks(fullFlux, spec.frameTimes);
 
   return {
     duration: buffer.duration,
     sampleRate,
-    onsets: pickPeaks(fullFlux, spec.frameTimes),
+    onsets,
     bassOnsets: pickPeaks(bassFlux, spec.frameTimes),
     trebleOnsets: pickPeaks(trebleFlux, spec.frameTimes),
     energy: normalizeEnvelope(rmsEnvelope(samples, sampleRate)),
     bassEnergy: normalizeEnvelope(frameTimes.map((t, i) => ({ time: t, value: bassEnergyRaw[i] }))),
+    trebleEnergy: normalizeEnvelope(frameTimes.map((t, i) => ({ time: t, value: trebleEnergyRaw[i] }))),
+    tempo: estimateTempo(onsets),
   };
 }
