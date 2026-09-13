@@ -1,17 +1,24 @@
-import { useEffect, useRef, useState } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Canvas, useFrame, useThree, type ThreeEvent } from "@react-three/fiber";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RoomEnvironment } from "three/examples/jsm/environments/RoomEnvironment.js";
 import * as THREE from "three";
 import { errorMessage } from "../../lib/errors";
 import { useConfigStore } from "../../store/configStore";
+import { useZonesStore, deviceStateKey } from "../../store/zonesStore";
+import { INPUT_CLASS } from "../../lib/styles";
+import { jetState } from "../../lib/waterJet";
+
+const inputClass = INPUT_CLASS;
 
 // Relative path is required: a packaged build loads via file://, which has no server root for an absolute "/models/..." path to resolve against.
 const MODEL_URL = "./models/fountain.gltf";
 
 // Target size the model's bounding box is normalized to, regardless of the model's own modeled units/scale.
 const TARGET_SIZE = 6;
+
+const JET_RADIUS = 0.07; // the model ships only the physical nozzle housings, no spray geometry -- a simple cone stands in, sized by lib/waterJet.ts
 
 /** Hand-rolled instead of @react-three/drei's <OrbitControls> to avoid drei's ~14MB of unrelated transitive deps (mediapipe, hls.js). */
 function CameraControls(): null {
@@ -56,7 +63,17 @@ function SceneEnvironment(): null {
 }
 
 /** Loads the fountain model once, centers/normalizes it, and plays any baked-in animations; uses GLTFLoader directly rather than drei's useGLTF for the same reason as CameraControls. */
-function FountainModel({ onError }: { onError: (message: string) => void }): JSX.Element | null {
+function FountainModel({
+  onLoaded,
+  onError,
+  pickable,
+  onPickNode,
+}: {
+  onLoaded: (scene: THREE.Group) => void;
+  onError: (message: string) => void;
+  pickable: boolean;
+  onPickNode: (nodeName: string) => void;
+}): JSX.Element | null {
   const [model, setModel] = useState<THREE.Group | null>(null);
   const mixerRef = useRef<THREE.AnimationMixer | null>(null);
 
@@ -87,6 +104,7 @@ function FountainModel({ onError }: { onError: (message: string) => void }): JSX
         }
 
         setModel(scene);
+        onLoaded(scene);
       },
       undefined,
       (err) => {
@@ -100,22 +118,117 @@ function FountainModel({ onError }: { onError: (message: string) => void }): JSX
       mixerRef.current?.stopAllAction();
       mixerRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- onError is a stable setter from the parent, loading is a one-time mount effect
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onLoaded/onError are stable setters from the parent, loading is a one-time mount effect
   }, []);
 
   useFrame((_, delta) => mixerRef.current?.update(delta));
 
-  return model ? <primitive object={model} /> : null;
+  const handleClick = pickable
+    ? (event: ThreeEvent<MouseEvent>) => {
+        event.stopPropagation();
+        if (event.object.name) onPickNode(event.object.name);
+      }
+    : undefined;
+
+  return model ? <primitive object={model} onClick={handleClick} /> : null;
+}
+
+interface MappedDevice {
+  deviceId: string;
+  zoneId: number;
+  instanceId: string;
+  channel: string;
+  category: "valve" | "motor" | "light";
+  modelNode: string;
+}
+
+/** One translucent cone per device that's been assigned a 3D node (see the mapping editor below), sized/shown from that device's LIVE state -- a valve's water either is or isn't flowing, a motor's jet rises with its commanded frequency. */
+function WaterJets({ scene, devices }: { scene: THREE.Group; devices: MappedDevice[] }): JSX.Element {
+  const liveDevices = useZonesStore((s) => s.devices);
+
+  return (
+    <>
+      {devices.map((d) => {
+        const node = scene.getObjectByName(d.modelNode);
+        if (!node) return null;
+        const position = node.getWorldPosition(new THREE.Vector3());
+        const live = liveDevices.get(deviceStateKey(d.zoneId, d.instanceId, d.channel))?.state;
+        const { visible, height } = jetState(d.category, live);
+        if (!visible) return null;
+
+        return (
+          <mesh key={d.deviceId} position={[position.x, position.y + height / 2, position.z]}>
+            <coneGeometry args={[JET_RADIUS, height, 10]} />
+            <meshStandardMaterial color="#7ec8e3" transparent opacity={0.55} emissive="#3a8fc4" emissiveIntensity={0.3} />
+          </mesh>
+        );
+      })}
+    </>
+  );
+}
+
+/** A small marker at the currently-selected node in the mapping editor, so clicking a mesh in a dense cluster confirms which one actually got picked. */
+function SelectionMarker({ scene, nodeName }: { scene: THREE.Group; nodeName: string | null }): JSX.Element | null {
+  if (!nodeName) return null;
+  const node = scene.getObjectByName(nodeName);
+  if (!node) return null;
+  const position = node.getWorldPosition(new THREE.Vector3());
+  return (
+    <mesh position={[position.x, position.y, position.z]}>
+      <sphereGeometry args={[0.14, 12, 12]} />
+      <meshBasicMaterial color="#ffcc00" wireframe />
+    </mesh>
+  );
 }
 
 export function ScenePreview(): JSX.Element {
   const configuredZones = useConfigStore((s) => s.zones);
   const loadZones = useConfigStore((s) => s.loadZones);
+  const selectedZoneId = useConfigStore((s) => s.selectedZoneId);
+  const setDeviceModelNode = useConfigStore((s) => s.setDeviceModelNode);
   const [modelError, setModelError] = useState<string | null>(null);
+  const [scene, setScene] = useState<THREE.Group | null>(null);
+
+  const [mappingMode, setMappingMode] = useState(false);
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [assignDeviceId, setAssignDeviceId] = useState("");
 
   useEffect(() => {
     void loadZones();
   }, [loadZones]);
+
+  const mappedDevices = useMemo<MappedDevice[]>(
+    () =>
+      configuredZones.flatMap((zone) =>
+        zone.devices
+          .filter((d) => d.model_node && (d.category === "valve" || d.category === "motor"))
+          .map((d) => ({
+            deviceId: d.device_id,
+            zoneId: zone.zone_id,
+            instanceId: d.instance_id,
+            channel: d.channel,
+            category: d.category as "valve" | "motor",
+            modelNode: d.model_node as string,
+          })),
+      ),
+    [configuredZones],
+  );
+
+  const selectedZone = configuredZones.find((z) => z.zone_id === selectedZoneId) ?? null;
+  const assignableDevices = (selectedZone?.devices ?? []).filter((d) => d.category === "valve" || d.category === "motor");
+  // Searched across every zone, not just the selected one -- a node could already be assigned to a device that belongs to a different zone than whatever the sidebar currently has selected.
+  const currentAssignment = mappedDevices.find((d) => d.modelNode === selectedNode) ?? null;
+
+  async function handleAssign(): Promise<void> {
+    if (!selectedZoneId || !selectedNode || !assignDeviceId) return;
+    await setDeviceModelNode(selectedZoneId, assignDeviceId, selectedNode);
+    setAssignDeviceId("");
+  }
+
+  async function handleClear(): Promise<void> {
+    if (!currentAssignment) return;
+    await setDeviceModelNode(currentAssignment.zoneId, currentAssignment.deviceId, null);
+  }
 
   return (
     <div className="relative flex-1 overflow-hidden bg-bg-base">
@@ -125,9 +238,70 @@ export function ScenePreview(): JSX.Element {
         <directionalLight position={[-5, 4, -5]} intensity={0.4} />
         <gridHelper args={[20, 20, "#464647", "#2d2d30"]} />
         <SceneEnvironment />
-        <FountainModel onError={setModelError} />
+        <FountainModel onLoaded={setScene} onError={setModelError} pickable={mappingMode} onPickNode={setSelectedNode} />
+        {scene && !mappingMode && <WaterJets scene={scene} devices={mappedDevices} />}
+        {scene && mappingMode && <SelectionMarker scene={scene} nodeName={selectedNode} />}
         <CameraControls />
       </Canvas>
+
+      <div className="absolute right-md top-md flex flex-col items-end gap-xs">
+        <button
+          onClick={() => {
+            setMappingMode((v) => !v);
+            setSelectedNode(null);
+          }}
+          className="h-control rounded-control border border-border bg-bg-surface1 px-md text-sm text-text-primary hover:bg-bg-surface2"
+        >
+          {mappingMode ? "Done mapping" : "Edit nozzle mapping"}
+        </button>
+
+        {mappingMode && (
+          <div className="w-72 rounded-panel border border-border bg-bg-surface1 p-md text-sm">
+            {!selectedNode ? (
+              <p className="text-text-muted">Click a part of the model to select it.</p>
+            ) : (
+              <div className="flex flex-col gap-sm">
+                <div>
+                  <span className="text-text-muted">Selected: </span>
+                  <span className="font-medium text-text-primary">{selectedNode}</span>
+                </div>
+
+                {currentAssignment ? (
+                  <div className="flex flex-col gap-xs">
+                    <div>
+                      <span className="text-text-muted">Assigned to: </span>
+                      <span className="font-medium text-text-primary">{currentAssignment.deviceId}</span>
+                    </div>
+                    <button onClick={() => void handleClear()} className="h-control rounded-control border border-border bg-bg-surface3 px-sm text-xs text-text-primary hover:bg-bg-surface2">
+                      Clear assignment
+                    </button>
+                  </div>
+                ) : selectedZoneId === null ? (
+                  <p className="text-text-muted">Select a zone in the sidebar to assign a device.</p>
+                ) : (
+                  <div className="flex flex-col gap-xs">
+                    <select value={assignDeviceId} onChange={(e) => setAssignDeviceId(e.target.value)} className={inputClass}>
+                      <option value="">Assign device…</option>
+                      {assignableDevices.map((d) => (
+                        <option key={d.device_id} value={d.device_id}>
+                          {d.device_id} ({d.category})
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={() => void handleAssign()}
+                      disabled={!assignDeviceId}
+                      className="h-control rounded-control bg-primary px-sm text-xs text-text-primary hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Assign
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {configuredZones.length === 0 && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
