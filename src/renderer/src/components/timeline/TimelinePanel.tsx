@@ -2,9 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useConfigStore } from "../../store/configStore";
 import { useScenariosStore } from "../../store/scenariosStore";
 import { useTimelineStore } from "../../store/timelineStore";
-import { describeError } from "../../lib/errors";
 import { restClient } from "../../lib/restClient";
-import { resolveDeviceIds } from "../../lib/scenario";
+import { resolveDeviceIds, slugify } from "../../lib/scenario";
 import { INPUT_CLASS } from "../../lib/styles";
 import { useWheelStep } from "../../lib/useWheelStep";
 import { decodeAudioDuration } from "../../lib/waveform";
@@ -12,6 +11,7 @@ import { DeviceCategoryTabs } from "./DeviceCategoryTabs";
 import { DeviceTablePanel } from "./DeviceTablePanel";
 import { GenerateFromMusicDialog } from "./GenerateFromMusicDialog";
 import { ScenarioDevicePicker } from "./ScenarioDevicePicker";
+import { ScenarioManagerDialog } from "./ScenarioManagerDialog";
 import { SubTab } from "./SubTab";
 import { buildNozzleColumns, groupNozzlePairs } from "./deviceColumns";
 import type { DeviceType } from "../../lib/protocol";
@@ -24,18 +24,12 @@ const CATEGORY_BY_SUBVIEW: Record<Exclude<SubView, "nozzles">, DeviceType> = {
   light: "light",
 };
 
-/** Scenario ids become filenames on the daemon (persistence.py's `_SAFE_SCENARIO_ID = ^[A-Za-z0-9_-]+$`) -- must only ever produce characters that pattern accepts. */
-function slugify(name: string): string {
-  return name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "scenario";
-}
-
 /** Authoring screen for one scenario file; Nozzles isn't its own device category -- it's motor devices paired by nozzle_group, so paired motors are excluded from the Motors tab and shown only here. */
 export function TimelinePanel(): JSX.Element {
   const zones = useConfigStore((s) => s.zones);
   const loadZones = useConfigStore((s) => s.loadZones);
   const scenarios = useScenariosStore((s) => s.scenarios);
   const loadScenarios = useScenariosStore((s) => s.loadScenarios);
-  const deleteScenario = useScenariosStore((s) => s.deleteScenario);
 
   // Individual selectors, not the whole store -- that re-rendered on every write regardless of relevance, and DeviceTable resets grid selection whenever `columns` changes identity (see DeviceTable.tsx), wiping in-progress edits.
   const scenarioId = useTimelineStore((s) => s.scenarioId);
@@ -61,6 +55,7 @@ export function TimelinePanel(): JSX.Element {
   const [subView, setSubView] = useState<SubView>("valves");
   const [devicePicker, setDevicePicker] = useState<"new" | "edit" | null>(null);
   const [showGenerateDialog, setShowGenerateDialog] = useState(false);
+  const [showScenarioManager, setShowScenarioManager] = useState(false);
   // Transient "saved" confirmation -- the dirty dot disappearing is easy to miss; auto-clears rather than lingering until the next click.
   const [justSaved, setJustSaved] = useState(false);
 
@@ -94,6 +89,16 @@ export function TimelinePanel(): JSX.Element {
   useEffect(() => {
     if (selectedZoneId === null && zones.length > 0) setSelectedZoneId(zones[0].zone_id);
   }, [zones, selectedZoneId]);
+
+  // A Load/Import/Generate can bring in a scenario authored for a DIFFERENT zone than whatever tab is currently open (see ScenarioFile.zoneId's docstring) -- without this, its device_ids simply wouldn't match the open zone's devices and resolveDeviceIds would silently fall back to "every device in the wrong zone" instead. Switches to the right tab when it still exists; otherwise at least surfaces the mismatch instead of staying silent about it.
+  useEffect(() => {
+    if (file.zoneId == null || file.zoneId === selectedZoneId) return;
+    if (zones.some((z) => z.zone_id === file.zoneId)) {
+      setSelectedZoneId(file.zoneId);
+    } else {
+      setError(`This scenario was created for zone ${file.zoneId}, which doesn't exist here -- showing it against the current zone instead; device references may not match.`);
+    }
+  }, [file.zoneId, selectedZoneId, zones, setError]);
 
   // Guards against closing/reloading the window with unsaved edits.
   useEffect(() => {
@@ -234,21 +239,12 @@ export function TimelinePanel(): JSX.Element {
           ↷ Redo
         </button>
 
-        <select
-          value=""
-          onChange={(e) => {
-            const id = e.target.value;
-            if (id && confirmDiscard()) void loadScenario(id);
-          }}
-          className={fieldClass}
+        <button
+          onClick={() => setShowScenarioManager(true)}
+          className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm text-text-primary hover:bg-bg-surface2"
         >
-          <option value="">Load…</option>
-          {scenarios.map((s) => (
-            <option key={s.scenario_id} value={s.scenario_id}>
-              {s.name}
-            </option>
-          ))}
-        </select>
+          Scenarios…
+        </button>
 
         <button
           onClick={() => confirmDiscard() && setDevicePicker("new")}
@@ -264,24 +260,6 @@ export function TimelinePanel(): JSX.Element {
           className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm text-text-primary hover:bg-bg-surface2 disabled:cursor-not-allowed disabled:opacity-40"
         >
           🎵 Generate…
-        </button>
-
-        <button
-          disabled={!scenarioId || saving}
-          onClick={async () => {
-            if (!scenarioId) return;
-            if (!window.confirm(`Delete saved scenario "${scenarioId}"? This can't be undone.`)) return;
-            try {
-              await deleteScenario(scenarioId);
-              newScenario([]);
-            } catch (err) {
-              setError(describeError(err));
-            }
-          }}
-          title={scenarioId ? `Delete "${scenarioId}"` : "Load or save a scenario first"}
-          className="h-control rounded-control border border-border bg-bg-surface3 px-sm text-sm text-danger hover:bg-danger hover:text-white disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-bg-surface3 disabled:hover:text-danger"
-        >
-          Delete
         </button>
 
         <button
@@ -356,7 +334,7 @@ export function TimelinePanel(): JSX.Element {
           }
           onConfirm={(ids) => {
             if (devicePicker === "new") {
-              newScenario(ids);
+              newScenario(ids, selectedZoneId);
             } else {
               setDeviceIds(ids);
             }
@@ -371,9 +349,28 @@ export function TimelinePanel(): JSX.Element {
           zone={selectedZone}
           onClose={() => setShowGenerateDialog(false)}
           onGenerated={({ name, duration, musicFile, events }) => {
-            loadGeneratedScenario({ name, duration, music_file: musicFile, events, deviceIds: [] });
+            loadGeneratedScenario({ name, duration, music_file: musicFile, events, deviceIds: [], zoneId: selectedZoneId });
             setShowGenerateDialog(false);
           }}
+        />
+      )}
+
+      {showScenarioManager && (
+        <ScenarioManagerDialog
+          currentScenarioId={scenarioId}
+          zones={zones}
+          onClose={() => setShowScenarioManager(false)}
+          onLoad={(id) => {
+            if (!confirmDiscard()) return;
+            void loadScenario(id);
+            setShowScenarioManager(false);
+          }}
+          onImport={(imported) => {
+            if (!confirmDiscard()) return;
+            loadGeneratedScenario(imported);
+            setShowScenarioManager(false);
+          }}
+          onDeletedCurrent={() => newScenario([], selectedZoneId)}
         />
       )}
     </div>

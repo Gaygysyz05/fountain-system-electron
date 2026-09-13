@@ -7,15 +7,9 @@ import type { DeviceType } from "../../lib/protocol";
 const ROW_HEIGHT = 34;
 const RULER_HEIGHT = 34;
 const LABEL_WIDTH = 70;
-const MIN_SPAN = 0.2;
-const PULSE_LENGTH = 0.5;
-const SNAP = 0.1;
+const DEFAULT_PULSE_LENGTH = 0.5;
 const MOVE_THRESHOLD_PX = 3;
 const PX_PER_SECOND = 40;
-
-function snap(t: number): number {
-  return Math.round(t / SNAP) * SNAP;
-}
 
 /** Bounds a drag to the room before it would overlap a neighboring span, so commitChannelSpans never has to resolve overlaps itself. */
 function roomBefore(spans: ToggleSpan[], excludeIdx: number | null, pivot: number): number {
@@ -50,14 +44,40 @@ export function PianoRollEditor({
   field,
   devices,
   duration,
+  minToggleInterval,
 }: {
   category: DeviceType;
   field: string;
   devices: Array<{ device_id: string; label: string }>;
   duration: number;
+  /** The relay's shortest legal hold (see DeviceTablePanel) -- used as BOTH the snap grid and the minimum span, so every span AND every gap between spans lands on a multiple of it and is therefore something the hardware can actually execute. */
+  minToggleInterval: number;
 }): JSX.Element {
   const events = useTimelineStore((s) => s.file.events);
   const commitChannelSpans = useTimelineStore((s) => s.commitChannelSpans);
+
+  const snapUnit = Math.max(0.1, minToggleInterval);
+  const minSpan = snapUnit;
+  const pulseLength = Math.max(DEFAULT_PULSE_LENGTH, snapUnit);
+
+  const snap = useCallback((t: number): number => Math.round(t / snapUnit) * snapUnit, [snapUnit]);
+  // Snapping the two ends independently can shorten a span, so the result is re-widened rather than trusted -- a
+  // too-short span would either commit an on/off pair the relay can't physically execute, or (past versions of this
+  // function) silently drop back under minSpan anyway: widening snappedEnd and THEN clamping it to `max` could pull
+  // it back down past snappedStart + minSpan whenever `max` wasn't itself an exact multiple of snapUnit. Fixed by
+  // clamping the end FIRST (against both its widen-floor and `max`) and deriving the start from that -- the two
+  // Math.max/Math.min pairs make end land in [min + minSpan, max] and start land in [min, end - minSpan]
+  // unconditionally, so the final length is >= minSpan by construction, not by hoping snapping cooperates. `min`
+  // and `max` must already leave at least one minSpan of room (roomBefore/roomAfter + the pre-snap length checks at
+  // every call site guarantee this), or there is no valid span to produce.
+  const snapSpan = useCallback(
+    (start: number, end: number, min: number, max: number): { start: number; end: number } => {
+      const snappedEnd = Math.min(max, Math.max(snap(end), min + minSpan));
+      const snappedStart = Math.max(min, Math.min(snap(start), snappedEnd - minSpan));
+      return { start: snappedStart, end: snappedEnd };
+    },
+    [snap, minSpan],
+  );
 
   const [drag, setDrag] = useState<DragState | null>(null);
   const [selected, setSelected] = useState<{ deviceId: string; idx: number } | null>(null);
@@ -109,28 +129,30 @@ export function PianoRollEditor({
       }
       if (mode === "resize-left") {
         const min = roomBefore(spans, idx, origStart);
-        return { deviceId, mode, idx, moved, liveStart: Math.max(min, Math.min(t, origEnd - MIN_SPAN)), liveEnd: origEnd };
+        return { deviceId, mode, idx, moved, liveStart: Math.max(min, Math.min(t, origEnd - minSpan)), liveEnd: origEnd };
       }
       // resize-right
       const max = roomAfter(spans, idx, origEnd, duration);
-      return { deviceId, mode, idx, moved, liveStart: origStart, liveEnd: Math.min(max, Math.max(t, origStart + MIN_SPAN)) };
+      return { deviceId, mode, idx, moved, liveStart: origStart, liveEnd: Math.min(max, Math.max(t, origStart + minSpan)) };
     }
 
     function commit(final: DragState): void {
       const rest = spans.filter((_, i) => i !== idx);
       if (final.mode === "create") {
+        const min = roomBefore(spans, null, anchorTime);
+        const max = roomAfter(spans, null, anchorTime, duration);
         if (!final.moved) {
-          const min = roomBefore(spans, null, anchorTime);
-          const max = roomAfter(spans, null, anchorTime, duration);
           const start = snap(Math.max(min, anchorTime));
-          const end = Math.min(max, start + PULSE_LENGTH);
-          if (end - start >= MIN_SPAN) commitChannelSpans(deviceId, field, [...rest, { start, end }]);
-        } else if (final.liveEnd - final.liveStart >= MIN_SPAN) {
-          commitChannelSpans(deviceId, field, [...rest, { start: snap(final.liveStart), end: snap(final.liveEnd) }]);
+          const end = Math.min(max, start + pulseLength);
+          if (end - start >= minSpan) commitChannelSpans(deviceId, field, [...rest, { start, end }]);
+        } else if (final.liveEnd - final.liveStart >= minSpan) {
+          commitChannelSpans(deviceId, field, [...rest, snapSpan(final.liveStart, final.liveEnd, min, max)]);
         }
         return;
       }
-      commitChannelSpans(deviceId, field, [...rest, { start: snap(final.liveStart), end: snap(final.liveEnd) }]);
+      const min = roomBefore(spans, idx, final.liveStart);
+      const max = roomAfter(spans, idx, final.liveEnd, duration);
+      commitChannelSpans(deviceId, field, [...rest, snapSpan(final.liveStart, final.liveEnd, min, max)]);
     }
 
     let lastClientX = downClientX;
@@ -159,7 +181,7 @@ export function PianoRollEditor({
     window.addEventListener("mouseup", onUp);
     window.addEventListener("blur", onBlur);
     dragCleanupRef.current = cleanup;
-  }, [spansByDevice, duration, commitChannelSpans, field]);
+  }, [spansByDevice, duration, commitChannelSpans, field, minSpan, pulseLength, snap, snapSpan]);
 
   const onRowMouseDown = useCallback(
     (deviceId: string, e: React.MouseEvent<HTMLDivElement>): void => {

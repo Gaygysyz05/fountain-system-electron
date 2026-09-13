@@ -18,6 +18,17 @@ contextBridge.exposeInMainWorld("electron", {
   // Saves the log ring buffer (daemon stdout/stderr + lifecycle events) to an operator-picked file for on-site diagnostics without a dev terminal.
   exportLogs: (): Promise<{ ok: boolean; path?: string; error?: string | null }> => ipcRenderer.invoke("export-logs"),
 
+  // Scenario file <-> disk, for backup/transfer independent of the daemon's own data/scenarios/ folder (see main/index.ts). Content is a plain JSON string both ways -- this process doesn't parse it.
+  exportScenarioFile: (defaultName: string, content: string): Promise<{ ok: boolean; path?: string; error?: string | null }> =>
+    ipcRenderer.invoke("export-scenario-file", defaultName, content),
+  importScenarioFile: (): Promise<{ ok: boolean; path?: string; content?: string; error?: string | null }> =>
+    ipcRenderer.invoke("import-scenario-file"),
+
+  // Swaps the 3D preview's model from inside the app (see ScenePreview.tsx) -- stored under userData and served back over fountain-model:// (see main/index.ts), so this never touches the read-only-once-packaged src/renderer/public/models/ folder.
+  getModelInfo: (): Promise<{ hasCustomModel: boolean; entry?: string }> => ipcRenderer.invoke("get-model-info"),
+  importModel: (): Promise<{ ok: boolean; entry?: string; error?: string | null }> => ipcRenderer.invoke("import-3d-model"),
+  resetModel: (): Promise<void> => ipcRenderer.invoke("reset-3d-model"),
+
   // Auto-launch reads/writes app.getLoginItemSettings() directly (see main/index.ts); supported is false in dev mode (no installed .exe to register) so Settings can show the toggle disabled instead of silently no-op.
   getAutoLaunch: (): Promise<{ enabled: boolean; supported: boolean }> => ipcRenderer.invoke("get-auto-launch"),
   setAutoLaunch: (enabled: boolean): Promise<void> => ipcRenderer.invoke("set-auto-launch", enabled),

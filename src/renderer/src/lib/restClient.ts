@@ -42,6 +42,7 @@ interface ScenarioFileWire {
   music_file: string | null;
   events: Array<{ time: number; device_id: string; parameters: Record<string, unknown> }>;
   device_ids?: string[];
+  zone_id?: number | null;
 }
 
 /** Hardware/runtime mutations go through the WS channel (connectionStore.sendCommand); this is stateless lookups and scenario-file CRUD only, which has nothing to do with live hardware state. */
@@ -65,6 +66,7 @@ export const restClient = {
         duration: file.duration,
         music_file: file.music_file,
         device_ids: file.deviceIds,
+        zone_id: file.zoneId,
         events: file.events.map((e) => ({ time: e.time, device_id: e.device_id, parameters: e.parameters })),
       }),
     });

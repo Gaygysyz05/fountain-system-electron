@@ -266,6 +266,8 @@ export interface ScenarioDto {
   scenario_id: string;
   name: string;
   duration: number;
+  /** Zone it was authored for (see ScenarioFile.zoneId); null for scenarios saved before this field existed. */
+  zone_id: number | null;
 }
 
 // -- REST: /schedule -----------------------------------------------------------

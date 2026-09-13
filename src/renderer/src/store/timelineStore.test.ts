@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { useTimelineStore } from "./timelineStore";
+import { restClient } from "../lib/restClient";
 import type { ScenarioEvent, ScenarioFile } from "../lib/scenario";
 
 function seedEvents(events: ScenarioEvent[]): void {
@@ -91,6 +92,7 @@ describe("loadGeneratedScenario", () => {
       music_file: "C:\\music\\song.mp3",
       events: [{ id: "gen-1", time: 0.5, device_id: "L1", parameters: { r: 255, g: 200, b: 120 } }],
       deviceIds: [],
+      zoneId: 1,
     };
     useTimelineStore.getState().loadGeneratedScenario(generated);
 
@@ -100,5 +102,63 @@ describe("loadGeneratedScenario", () => {
     expect(state.dirty).toBe(true);
     expect(state.past).toEqual([]);
     expect(state.future).toEqual([]);
+  });
+});
+
+describe("saveScenario / loadScenario race guards (_generation)", () => {
+  it("a save superseded by a newer load does not stomp the newer scenario's scenarioId/dirty", async () => {
+    seedEvents([]);
+    useTimelineStore.setState({ scenarioId: "old-scenario", dirty: true });
+
+    let resolveSave!: () => void;
+    const savePromise = new Promise<void>((resolve) => {
+      resolveSave = resolve;
+    });
+    const saveSpy = vi.spyOn(restClient, "saveScenario").mockReturnValue(savePromise);
+    const getSpy = vi.spyOn(restClient, "getScenarioFull").mockResolvedValue({
+      name: "other", duration: 10, music_file: null, events: [], device_ids: [], zone_id: 2,
+    });
+
+    const saveResult = useTimelineStore.getState().saveScenario("old-scenario"); // starts, network call not yet resolved
+
+    // While that save is still in flight, the operator loads a completely different scenario.
+    await useTimelineStore.getState().loadScenario("other-scenario");
+    expect(useTimelineStore.getState().scenarioId).toBe("other-scenario");
+
+    // NOW the stale save resolves.
+    resolveSave();
+    expect(await saveResult).toBe(true); // the disk write itself genuinely did succeed
+
+    // ...but it must not have reverted the store back to the old scenario it was saving.
+    expect(useTimelineStore.getState().scenarioId).toBe("other-scenario");
+    expect(useTimelineStore.getState().dirty).toBe(false); // from the load, not left dirty:true by a skipped save commit
+
+    saveSpy.mockRestore();
+    getSpy.mockRestore();
+  });
+
+  it("an earlier load's late response does not overwrite a later load's result", async () => {
+    let resolveFirst!: (value: Awaited<ReturnType<typeof restClient.getScenarioFull>>) => void;
+    const firstResponse = new Promise<Awaited<ReturnType<typeof restClient.getScenarioFull>>>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const getSpy = vi.spyOn(restClient, "getScenarioFull");
+    getSpy.mockReturnValueOnce(firstResponse);
+
+    const firstLoad = useTimelineStore.getState().loadScenario("scenario-a"); // starts, network call not yet resolved
+
+    getSpy.mockResolvedValueOnce({ name: "b", duration: 20, music_file: null, events: [], device_ids: [], zone_id: null });
+    await useTimelineStore.getState().loadScenario("scenario-b"); // starts AND resolves before "a" does
+    expect(useTimelineStore.getState().scenarioId).toBe("scenario-b");
+
+    // The slow first load ("a") finally resolves now, well after "b" already won.
+    resolveFirst({ name: "a", duration: 10, music_file: null, events: [], device_ids: [], zone_id: null });
+    await firstLoad;
+
+    // Must still show "b" -- "a"'s late response must not have overwritten it just because it resolved last.
+    expect(useTimelineStore.getState().scenarioId).toBe("scenario-b");
+    expect(useTimelineStore.getState().file.duration).toBe(20);
+
+    getSpy.mockRestore();
   });
 });

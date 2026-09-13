@@ -85,6 +85,14 @@ export function PlaybackPanel(): JSX.Element {
 
   const timelineZoneStatus = useZonesStore((s) => (timelineZoneId !== null ? s.zones.get(timelineZoneId) : undefined));
   const timelineState = timelineZoneStatus?.state ?? "stopped";
+  // Local optimistic copy synced to the daemon's is_looping (source of truth), mirroring
+  // ZoneControlCard's own reportedLooping effect below -- without this, opening the Timeline tab
+  // (or switching its zone picker) kept showing whatever timelineLoop last happened to be in this
+  // component's own state, never reflecting a Loop already turned on/off for that zone from the
+  // Controls tab, a second HMI window, or a reconnect mid-show.
+  useEffect(() => {
+    if (timelineZoneStatus?.is_looping !== undefined) setTimelineLoop(timelineZoneStatus.is_looping);
+  }, [timelineZoneStatus?.is_looping]);
   const timelineScenario = scenarios.find((s) => s.scenario_id === timelineScenarioId) ?? null;
   const timelineZone = zones.find((z) => z.zone_id === timelineZoneId) ?? null;
   const sendCommand = useConnectionStore((s) => s.sendCommand);

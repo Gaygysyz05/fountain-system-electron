@@ -15,11 +15,18 @@ export interface ScenarioFile {
   music_file: string | null;
   events: ScenarioEvent[];
   deviceIds: string[]; // which zone devices this scenario's editor tabs show -- see resolveDeviceIds
+  /** Which zone this scenario was authored for -- set once at New/Load/Import time, not re-stamped on every Save (switching the zone tab mid-edit shouldn't silently relabel an already-loaded scenario). null for scenarios saved before this field existed. See TimelinePanel's zone-mismatch effect. */
+  zoneId: number | null;
 }
 
 /** Empty/missing `deviceIds` falls back to every device currently in the zone (old/new scenarios); deliberately NOT derived from `events`, since under "state persists until changed" semantics a device can legitimately belong with zero events. */
 export function resolveDeviceIds(deviceIds: string[], allZoneDeviceIds: string[]): string[] {
   return deviceIds.length > 0 ? deviceIds : allZoneDeviceIds;
+}
+
+/** Scenario ids become filenames on the daemon (persistence.py's `_SAFE_SCENARIO_ID = ^[A-Za-z0-9_-]+$`) -- must only ever produce characters that pattern accepts. Shared by TimelinePanel (Save) and ScenarioManagerDialog (Duplicate). */
+export function slugify(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "scenario";
 }
 
 /** Shaped to match exactly what each driver's apply_state() expects (see fountain-daemon/app/drivers/*.py). */

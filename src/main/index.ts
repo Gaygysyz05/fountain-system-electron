@@ -1,13 +1,19 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
-import { isAbsolute, join, relative, resolve } from "path";
+import { app, BrowserWindow, dialog, ipcMain, net, protocol, shell } from "electron";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from "path";
 import { spawn, type ChildProcess } from "child_process";
-import { writeFile, readFile } from "fs/promises";
+import { writeFile, readFile, readdir, stat, mkdir, copyFile, rm } from "fs/promises";
+import { pathToFileURL } from "url";
 import { is } from "@electron-toolkit/utils";
 
 // Own copy rather than importing the renderer's lib/errors.ts -- separate process, separate module graph/build target.
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+// Must run before app "ready" fires (Electron's requirement) -- lets fountain-model:// behave like a normal origin (fetch, relative-URL resolution, CORS) so GLTFLoader's resource loading for an imported .gltf's external buffers/textures works the same as the bundled default's relative-path loading. See the "custom 3D model import" section below for what serves it.
+protocol.registerSchemesAsPrivileged([
+  { scheme: "fountain-model", privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true } },
+]);
 
 // This shell's own preferences (not the daemon's); login-item state itself lives in Windows' own registered entry, not duplicated here, to avoid drift.
 interface AppSettings {
@@ -155,6 +161,185 @@ ipcMain.handle("export-logs", async () => {
   }
 });
 
+// Scenarios otherwise only round-trip through the daemon's own data/scenarios/*.json -- these let an operator pull one out to an arbitrary location (backup, USB, another install) and back in, the same native-dialog pattern as export-logs above. Content is opaque JSON text end to end: the renderer owns the ScenarioFile shape (see lib/scenario.ts), this process just moves bytes.
+ipcMain.handle("export-scenario-file", async (_event, defaultName: string, content: string) => {
+  if (!mainWindow) return { ok: false, error: "no window" };
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: "Export Scenario",
+    defaultPath: defaultName,
+    filters: [{ name: "Fountain Scenario", extensions: ["json"] }],
+  });
+  if (result.canceled || !result.filePath) return { ok: false, error: null }; // cancelled, not a failure
+  try {
+    await writeFile(result.filePath, content, "utf-8");
+    return { ok: true, path: result.filePath };
+  } catch (err) {
+    return { ok: false, error: errorMessage(err) };
+  }
+});
+
+ipcMain.handle("import-scenario-file", async () => {
+  if (!mainWindow) return { ok: false, error: "no window" };
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Import Scenario",
+    properties: ["openFile"],
+    filters: [
+      { name: "Fountain Scenario", extensions: ["json"] },
+      { name: "All Files", extensions: ["*"] },
+    ],
+  });
+  if (result.canceled || result.filePaths.length === 0) return { ok: false, error: null };
+  try {
+    const content = await readFile(result.filePaths[0], "utf-8");
+    return { ok: true, path: result.filePaths[0], content };
+  } catch (err) {
+    return { ok: false, error: errorMessage(err) };
+  }
+});
+
+// -- custom 3D model import ----------------------------------------------------
+// Lets an operator swap the fountain preview's model from inside the app (the
+// Import button in ScenePreview.tsx) instead of hand-editing a source folder
+// that was never wired into the build at all. Stored under userData -- writable
+// in both dev and a packaged install, unlike src/renderer/public/models/, which
+// ends up inside app.asar (read-only) once packaged -- and served back to the
+// renderer over the custom fountain-model:// scheme registered above, since
+// fetch() can't read an arbitrary filesystem path directly.
+
+function modelsDir(): string {
+  return join(app.getPath("userData"), "models");
+}
+
+function modelManifestPath(): string {
+  return join(modelsDir(), "manifest.json");
+}
+
+interface ModelManifest {
+  entry: string; // filename of the model itself, relative to modelsDir() -- "model.glb" or "model.gltf"
+}
+
+async function readModelManifest(): Promise<ModelManifest | null> {
+  try {
+    return JSON.parse(await readFile(modelManifestPath(), "utf-8")) as ModelManifest;
+  } catch {
+    return null; // no custom model imported yet (or an unreadable manifest) -- caller falls back to the bundled default
+  }
+}
+
+ipcMain.handle("get-model-info", async () => {
+  const manifest = await readModelManifest();
+  return manifest ? { hasCustomModel: true, entry: manifest.entry } : { hasCustomModel: false };
+});
+
+ipcMain.handle("reset-3d-model", async () => {
+  await rm(modelsDir(), { recursive: true, force: true });
+});
+
+// A .gltf's mesh/texture data lives in separate files it references by a relative
+// "uri" (buffers[].uri, images[].uri) -- a data: URI is already embedded and
+// needs no file; anything else must be copied alongside the .gltf or the model
+// loads with missing geometry/textures.
+function collectGltfDependencyUris(gltfJson: unknown): string[] {
+  const data = gltfJson as { buffers?: Array<{ uri?: string }>; images?: Array<{ uri?: string }> };
+  const uris: string[] = [];
+  for (const entry of [...(data.buffers ?? []), ...(data.images ?? [])]) {
+    if (entry.uri && !entry.uri.startsWith("data:")) uris.push(decodeURIComponent(entry.uri));
+  }
+  return uris;
+}
+
+/** Finds the file a .gltf's `uri` actually refers to. Blender names the binary buffer after the
+ * .blend/scene rather than the export filename, so a perfectly good export routinely references
+ * e.g. "MyProject.bin" while the file saved right next to it is "fountain.bin" -- refusing the
+ * import over that naming quirk is a dead end for something nothing is actually wrong with. Falls
+ * back through: exact path, case-insensitive filename (Windows exports vs a case-sensitive check),
+ * then -- for the buffer specifically -- the only .bin in the folder, which is unambiguous by
+ * definition. Returns null only when there genuinely is no candidate. */
+async function resolveGltfDependency(sourceDir: string, uri: string): Promise<string | null> {
+  const direct = join(sourceDir, uri);
+  try {
+    await stat(direct); // stat, not readFile: a buffer can be tens of MB and this only asks "is it there"
+    return direct;
+  } catch {
+    // Not at the exact path -- try the fallbacks below.
+  }
+
+  const dir = dirname(direct);
+  let siblings: string[];
+  try {
+    siblings = await readdir(dir);
+  } catch {
+    return null;
+  }
+
+  const wanted = basename(uri).toLowerCase();
+  const caseInsensitive = siblings.find((f) => f.toLowerCase() === wanted);
+  if (caseInsensitive) return join(dir, caseInsensitive);
+
+  if (extname(wanted) === ".bin") {
+    const bins = siblings.filter((f) => f.toLowerCase().endsWith(".bin"));
+    if (bins.length === 1) return join(dir, bins[0]);
+  }
+  return null;
+}
+
+ipcMain.handle("import-3d-model", async () => {
+  if (!mainWindow) return { ok: false, error: "no window" };
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Import 3D Model",
+    properties: ["openFile"],
+    filters: [{ name: "3D Model", extensions: ["glb", "gltf"] }],
+  });
+  if (result.canceled || result.filePaths.length === 0) return { ok: false, error: null };
+
+  const sourcePath = result.filePaths[0];
+  const sourceDir = dirname(sourcePath);
+  const isGlb = sourcePath.toLowerCase().endsWith(".glb");
+  const entryName = isGlb ? "model.glb" : "model.gltf";
+
+  try {
+    let gltfText: string | null = null;
+    // uri as written in the .gltf -> the file on disk it actually resolves to (see resolveGltfDependency).
+    const dependencies = new Map<string, string>();
+    if (!isGlb) {
+      gltfText = await readFile(sourcePath, "utf-8");
+
+      // Resolve every referenced file BEFORE touching the currently-active model -- an export that's
+      // genuinely missing a piece must not leave the preview broken, it should just refuse and say which.
+      for (const uri of collectGltfDependencyUris(JSON.parse(gltfText))) {
+        const resolved = await resolveGltfDependency(sourceDir, uri);
+        if (!resolved) {
+          return { ok: false, error: `This model references "${uri}", and there's no matching file next to the .gltf -- re-export with that file included.` };
+        }
+        dependencies.set(uri, resolved);
+      }
+    }
+
+    // Only clears the previous custom model once resolution above has passed.
+    await rm(modelsDir(), { recursive: true, force: true });
+    await mkdir(modelsDir(), { recursive: true });
+
+    if (isGlb) {
+      await copyFile(sourcePath, join(modelsDir(), entryName));
+    } else {
+      await writeFile(join(modelsDir(), entryName), gltfText ?? "", "utf-8");
+      for (const [uri, sourceFile] of dependencies) {
+        // Copied under the name the .gltf ASKS for, not the name it happens to have on disk, so the
+        // .gltf itself never needs rewriting to match (see resolveGltfDependency's Blender note).
+        const destPath = join(modelsDir(), uri);
+        await mkdir(dirname(destPath), { recursive: true });
+        await copyFile(sourceFile, destPath);
+      }
+    }
+
+    const manifest: ModelManifest = { entry: entryName };
+    await writeFile(modelManifestPath(), JSON.stringify(manifest), "utf-8");
+    return { ok: true, entry: entryName };
+  } catch (err) {
+    return { ok: false, error: errorMessage(err) };
+  }
+});
+
 interface DaemonLaunch {
   command: string;
   args: string[];
@@ -271,7 +456,17 @@ function stopDaemon(): void {
   }
 }
 
-const DAEMON_SHUTDOWN_TIMEOUT_MS = 3000;
+// POST /shutdown awaits the daemon's own _emergency_stop_all_zones() before responding (see main.py),
+// which closes every relay channel SEQUENTIALLY per relay board -- one Modbus TCP connection only
+// ever has one transaction in flight (see modbus_valve.py's "single writer" consumer). Zones run
+// concurrently with each other, but a single large board (up to 256 channels, ModbusValveConfig's
+// own schema max) can still take several seconds even when every write succeeds quickly. 15s is
+// generous for that healthy case; tune it up further only if a real installation's largest single
+// board is bigger than that math comfortably covers. There is no value that also covers a
+// GENUINELY unreachable board (each of its writes would burn its own write_timeout before giving up)
+// without defeating the point of a bounded shutdown -- that case is expected to hit this timeout and
+// fall through to the unconditional kill below, same as before.
+const DAEMON_SHUTDOWN_TIMEOUT_MS = 15_000;
 
 // Asks the daemon over HTTP to stop hardware first, since on Windows Python's asyncio signal handlers aren't guaranteed to see kill() in time to run lifespan's shutdown cleanup (main.py's POST /shutdown) -- otherwise an active valve/motor/light could be left running.
 async function stopDaemonGracefully(): Promise<void> {
@@ -309,9 +504,24 @@ ipcMain.handle("set-auto-launch", async (_event, enabled: boolean) => {
   await writeAppSettings({ ...(await readAppSettings()), autoLaunchDefaultApplied: true });
 });
 
+// Serves userData/models/<path> for fountain-model://current/<path> -- must be registered after "ready" fires (Electron's requirement), before the renderer can possibly request it. net.fetch(file://...) does the actual streaming/MIME-sniffing rather than reading the file by hand.
+function registerModelProtocol(): void {
+  const modelsRoot = resolve(modelsDir());
+  protocol.handle("fountain-model", (request) => {
+    const relPath = decodeURIComponent(new URL(request.url).pathname.replace(/^\/+/, ""));
+    const resolvedPath = resolve(join(modelsRoot, relPath));
+    // Guards against a crafted "../.." path escaping userData/models -- same concern as fountain-daemon's resolve_music_path.
+    if (resolvedPath !== modelsRoot && resolvedPath !== modelsRoot + sep && !resolvedPath.startsWith(modelsRoot + sep)) {
+      return new Response("forbidden", { status: 403 });
+    }
+    return net.fetch(pathToFileURL(resolvedPath).toString());
+  });
+}
+
 // Guards against whenReady resolving before an already-called app.quit() (second-instance handoff) takes effect.
 if (gotSingleInstanceLock) {
   void app.whenReady().then(() => {
+    registerModelProtocol();
     createWindow();
     void configureAutoLaunch();
     void startDaemon();

@@ -3,8 +3,8 @@ import { describeError } from "../lib/errors";
 import { restClient } from "../lib/restClient";
 import { generateValvePattern, type ScenarioEvent, type ScenarioFile, type ValvePatternOptions } from "../lib/scenario";
 
-function emptyFile(deviceIds: string[] = []): ScenarioFile {
-  return { name: "New Scenario", duration: 30, music_file: null, events: [], deviceIds };
+function emptyFile(deviceIds: string[] = [], zoneId: number | null = null): ScenarioFile {
+  return { name: "New Scenario", duration: 30, music_file: null, events: [], deviceIds, zoneId };
 }
 
 const HISTORY_LIMIT = 50;
@@ -18,6 +18,13 @@ interface TimelineStore {
   error: string | null;
   setError: (message: string | null) => void;
 
+  /** Bumped by every action that replaces `file`'s identity outright (new/load-start/generate) --
+   * lets an in-flight loadScenario/saveScenario network response notice a newer such action already
+   * superseded it and skip applying its own now-stale result, instead of whichever request happens
+   * to RESOLVE last winning regardless of which was ISSUED last. Not touched by ordinary edits
+   * (setGridEvent etc.) -- those mutate the current file in place, they don't replace it. */
+  _generation: number;
+
   // -- undo/redo: scoped to `file.events` (the device grid), which is where
   // every high-frequency edit -- click, inline number, pattern, paste --
   // happens. Snapshot-based (whole `events` array per step) rather than
@@ -29,7 +36,7 @@ interface TimelineStore {
   undo: () => void;
   redo: () => void;
 
-  newScenario: (deviceIds: string[]) => void;
+  newScenario: (deviceIds: string[], zoneId: number | null) => void;
   /** Replaces the editor wholesale with an already-built file (see musicGenerator.ts's "Generate from music" flow) -- unlike newScenario, this arrives with real events/duration/music_file already filled in, not an empty shell. */
   loadGeneratedScenario: (file: ScenarioFile) => void;
   loadScenario: (scenarioId: string) => Promise<void>;
@@ -85,6 +92,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
   saving: false,
   error: null,
   setError: (message) => set({ error: message }),
+  _generation: 0,
 
   past: [],
   future: [],
@@ -113,15 +121,23 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
       };
     }),
 
-  newScenario: (deviceIds) => set({ scenarioId: "", file: emptyFile(deviceIds), dirty: false, error: null, past: [], future: [] }),
+  newScenario: (deviceIds, zoneId) =>
+    set((s) => ({ scenarioId: "", file: emptyFile(deviceIds, zoneId), dirty: false, error: null, past: [], future: [], _generation: s._generation + 1 })),
 
   // scenarioId is cleared, same as newScenario -- a generated show is a fresh, unsaved file until the operator reviews and explicitly saves it, never a silent overwrite of whatever was loaded before.
-  loadGeneratedScenario: (file) => set({ scenarioId: "", file, dirty: true, error: null, past: [], future: [] }),
+  loadGeneratedScenario: (file) =>
+    set((s) => ({ scenarioId: "", file, dirty: true, error: null, past: [], future: [], _generation: s._generation + 1 })),
 
   loadScenario: async (scenarioId: string) => {
-    set({ loading: true, error: null });
+    // Captured (and committed to the store) before the request even starts -- a SECOND loadScenario
+    // issued while this one is still in flight bumps _generation again, so whichever request's
+    // RESPONSE happens to arrive first can never win over one issued later. See _generation's own
+    // docstring on the interface above.
+    const generation = get()._generation + 1;
+    set({ loading: true, error: null, _generation: generation });
     try {
       const data = await restClient.getScenarioFull(scenarioId);
+      if (get()._generation !== generation) return; // superseded by a newer load/new/generate while this was in flight
       set({
         scenarioId,
         file: {
@@ -130,6 +146,7 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
           music_file: data.music_file ?? null,
           events: data.events.map((e) => ({ ...e, id: crypto.randomUUID() })),
           deviceIds: data.device_ids ?? [],
+          zoneId: data.zone_id ?? null,
         },
         dirty: false,
         loading: false,
@@ -137,17 +154,32 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
         future: [],
       });
     } catch (err) {
+      if (get()._generation !== generation) return; // don't surface a stale error over whatever superseded this load either
       set({ loading: false, error: describeError(err) });
     }
   },
 
   saveScenario: async (scenarioId: string) => {
+    const generation = get()._generation;
     set({ error: null, saving: true });
     try {
       await restClient.saveScenario(scenarioId, get().file);
+      if (get()._generation !== generation) {
+        // A newer load/new/generate replaced `file` while this save's network call was in flight.
+        // The save itself succeeded -- scenarioId's file on disk now genuinely matches what was in
+        // `file` at the moment Save was clicked, which is correct -- but this store has since moved
+        // on to something else and must not have ITS scenarioId/dirty stomped by committing the old
+        // save's result on top.
+        set({ saving: false });
+        return true;
+      }
       set({ scenarioId, dirty: false, saving: false });
       return true;
     } catch (err) {
+      if (get()._generation !== generation) {
+        set({ saving: false });
+        return false;
+      }
       set({ error: describeError(err), saving: false });
       return false;
     }

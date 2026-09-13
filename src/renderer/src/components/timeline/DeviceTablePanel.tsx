@@ -11,6 +11,11 @@ function roundTime(t: number): number {
   return Math.round(t * 10) / 10;
 }
 
+// Used when a valve instance predates min_toggle_interval being a configured field (or omits it) -- matches ModbusValveConfig's own schema default rather than letting an unset config mean "no limit at all".
+const RELAY_MIN_TOGGLE_FALLBACK = 0.5;
+// Non-valve tables (motors, lights) have no relay to protect, so their grid can still be stepped finely.
+const GRID_STEP_FLOOR = 0.1;
+
 // Field names vary by driver (host/port vs target_ip/target_port) and slave_id is absent for non-Modbus drivers (Art-Net), so both are checked defensively.
 function connectionSummary(instance: DriverInstanceDto): string | null {
   const host = instance.config.host ?? instance.config.target_ip;
@@ -55,11 +60,20 @@ export function DeviceTablePanel({
   // Defaults to grid on every mount so a returning operator sees the same view; timeline mode is valve-only for now since motor rows mix Hz with the toggle field.
   const [mode, setMode] = useState<"grid" | "timeline">("grid");
 
+  // The shortest a relay can physically be held before flipping back -- the STRICTEST of this table's instances, so a mixed table can't be authored past the slowest board's limit. Enforced, not just warned about (see minToggleInterval below): it's the floor for the grid's Step and the timeline's snapping, so whatever interval the operator types is one the hardware can actually execute.
+  const relayMinToggle =
+    category === "valve" && instances.length > 0
+      ? Math.max(...instances.map((i) => Number(i.config.min_toggle_interval ?? RELAY_MIN_TOGGLE_FALLBACK)))
+      : 0;
+  const stepFloor = relayMinToggle > 0 ? relayMinToggle : GRID_STEP_FLOOR;
+  // Clamped rather than stored pre-clamped, so switching to a stricter instance immediately tightens an already-typed Step instead of silently keeping an unachievable one.
+  const effectiveStep = Math.max(step, stepFloor);
+
   const rowTimes = useMemo(() => {
     const times: number[] = [];
-    for (let t = 0; t <= duration + 1e-9; t += step) times.push(roundTime(t));
+    for (let t = 0; t <= duration + 1e-9; t += effectiveStep) times.push(roundTime(t));
     return times;
-  }, [duration, step]);
+  }, [duration, effectiveStep]);
 
   const { effectiveByDevice, explicitTimes } = useMemo(() => {
     const byDevice = new Map<string, ScenarioEvent[]>();
@@ -154,10 +168,11 @@ export function DeviceTablePanel({
               Step
               <input
                 type="number"
-                min={0.1}
-                step={0.1}
-                value={step}
-                onChange={(e) => setStep(Math.max(0.1, parseFloat(e.target.value) || 1))}
+                min={stepFloor}
+                step={stepFloor}
+                value={effectiveStep}
+                title={relayMinToggle > 0 ? `This is the interval valves actually open and close at. Can't go below ${relayMinToggle}s -- the relay's configured minimum toggle interval.` : undefined}
+                onChange={(e) => setStep(Math.max(stepFloor, parseFloat(e.target.value) || stepFloor))}
                 className="h-input w-20 rounded-control border border-border bg-bg-surface3 px-sm text-sm text-text-primary focus:border-accent focus:outline-none"
               />
               s
@@ -179,6 +194,7 @@ export function DeviceTablePanel({
         {mode === "timeline" && (
           <span className="text-xs text-text-muted">
             Drag on a row to paint how long a valve is open. Drag an edge to resize, the middle to move. Click a span, then Delete to remove it. Spans can't overlap on the same valve.
+            {relayMinToggle > 0 && <> Snaps to {relayMinToggle}s -- the relay's minimum toggle interval.</>}
           </span>
         )}
       </div>
@@ -217,6 +233,7 @@ export function DeviceTablePanel({
           field="on"
           devices={columns.filter((c) => c.kind === "toggle").map((c) => ({ device_id: c.deviceId, label: c.label }))}
           duration={duration}
+          minToggleInterval={stepFloor}
         />
       )}
     </div>
