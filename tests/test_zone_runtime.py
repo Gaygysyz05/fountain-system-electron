@@ -237,6 +237,54 @@ async def test_set_global_brightness_retroactively_rescales_an_already_lit_light
     assert light.applied[-1] == ("1", {"r": 100.0, "g": 50.0, "b": 0.0})
 
 
+async def test_repeated_identical_scenario_events_keep_the_motor_watchdog_refreshed() -> None:
+    """A scenario export repeats each device's last value every ~1s for the
+    whole show (see data/scenarios/salam.json) -- _dispatch_device_state
+    used to silently swallow the whole event at the PLAYER level whenever
+    it was identical to the last one, so a motor kept running via repeated
+    identical events never got its watchdog refreshed past the very first
+    one and was force-stopped a couple seconds later despite the scenario
+    continuously commanding it to keep running."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    motor = FakeDriverInstance(DeviceCategory.MOTOR)
+    _register_fake_instance(zone, "inv1", motor)
+    await zone.add_device("M1", "inv1", "1")
+    zone.player.watchdog_timeout = 0.15
+
+    project = Project(duration=10.0, events=[
+        Event(time=t, device_id="M1", parameters={"frequency": 30.0, "active": True})
+        for t in (0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3)
+    ])
+    zone.player.load_project(project, "s1")
+    await zone.player.play()
+
+    await asyncio.sleep(0.4)  # past every event's time and past watchdog_timeout if refresh had stopped
+
+    assert "M1" in zone.player.active_devices  # kept refreshed by the repeats, not timed out
+    assert len(motor.applied) == 1  # but the repeats were identical -- only one actual driver write
+
+    await zone.player.stop()
+
+
+async def test_set_device_state_always_writes_even_when_unchanged() -> None:
+    """Unlike a scenario tick's repeated identical event, a manual
+    Devices-tab test-fire must always reach the driver -- an operator
+    clicking the same test control twice expects it to actually re-send,
+    not silently no-op because nothing "changed" from the daemon's point
+    of view."""
+    bus = EventBus()
+    zone = ZoneRuntime(zone_id=1, bus=bus)
+    motor = FakeDriverInstance(DeviceCategory.MOTOR)
+    _register_fake_instance(zone, "inv1", motor)
+    await zone.add_device("M1", "inv1", "1")
+
+    zone.set_device_state("M1", {"frequency": 30.0, "active": True})
+    zone.set_device_state("M1", {"frequency": 30.0, "active": True})  # identical repeat
+
+    assert len(motor.applied) == 2
+
+
 async def test_emergency_stop_clears_live_parameters_so_global_slider_does_not_rearm() -> None:
     """emergency_stop() used to only stop the player and the driver
     instances -- it never cleared device_last_parameters, the cache

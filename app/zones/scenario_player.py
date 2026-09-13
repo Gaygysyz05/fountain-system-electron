@@ -8,11 +8,13 @@ for the threading->asyncio port itself, which is unchanged): the four
 type-specific callbacks (on_valve_batch, on_motor_event, on_lighting_event,
 on_nozzle_event) collapse into ONE `on_device_event`, keyed purely by
 `Event.device_id`. The scheduler has no idea what a "valve" or "motor" is
-anymore -- it batches and dedupes events per device per tick exactly like
-before, then hands each changed device's latest Event to ZoneRuntime, which
-is the only place that knows how to route a device_id to a driver instance
-and channel (see zone_runtime.py). This is what makes adding a new device
-category later (say, a sensor input) not require touching this file.
+anymore -- it batches events per device per tick (last event per device
+wins) and forwards every one, changed or not, to ZoneRuntime, which is the
+only place that knows how to route a device_id to a driver instance and
+channel, and therefore the only place that can safely decide what's safe to
+dedup (see zone_runtime.py's _dispatch_device_state). This is what makes
+adding a new device category later (say, a sensor input) not require
+touching this file.
 
 The motor watchdog generalizes the same way: it used to be motor-specific
 (active_motors: dict[slave_id, timestamp]); now any device category CAN opt
@@ -65,7 +67,6 @@ class ZoneScenarioPlayer:
         self.active_devices: dict[str, float] = {}
         self.watchdog_timeout = DEFAULT_WATCHDOG_TIMEOUT
 
-        self._last_device_states: dict[str, object] = {}
         self._seeking = False  # true while a seek's audio reposition is in flight -- see seek()/_loop()
         self._task: Optional[asyncio.Task] = None
         # Runs _check_watchdog on a fixed cadence independent of playback
@@ -109,7 +110,6 @@ class ZoneScenarioPlayer:
         self.current_position = 0.0
         self.processed_events.clear()
         self.last_processed_event_index = -1
-        self._last_device_states.clear()
 
     def _sync_processed_events(self) -> None:
         """Recomputes which pending_events are already 'in the past'
@@ -148,7 +148,6 @@ class ZoneScenarioPlayer:
             # run should start from). Stop() already reset position to 0 on
             # its own; this only needs to resync the event-processed
             # bookkeeping to wherever current_position actually is right now.
-            self._last_device_states.clear()
             self._sync_processed_events()
             if self.project.music_file and self.project.music_file != self._loaded_music_file:
                 self._loaded_music_file = self.project.music_file if await self.audio.load(self.project.music_file) else None
@@ -388,9 +387,10 @@ class ZoneScenarioPlayer:
             return
 
         for device_id, event in device_batch.items():
-            if self._last_device_states.get(device_id) == event.parameters:
-                continue
-            self._last_device_states[device_id] = event.parameters
+            # Forwarded even if identical to the last tick's value for this
+            # device -- deciding what's safe to skip needs device category
+            # (motor watchdog refresh vs. a level-triggered valve/light),
+            # which only ZoneRuntime has; see its _dispatch_device_state.
             try:
                 self.on_device_event(event)
             except Exception:  # noqa: BLE001 -- one bad device (e.g. an unparseable channel) must not block the rest of this tick's batch

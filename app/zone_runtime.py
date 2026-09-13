@@ -320,10 +320,15 @@ class ZoneRuntime:
     # -- scheduler callback, injected into ZoneScenarioPlayer -------------------
 
     def _handle_device_event(self, event: Event) -> None:
-        if self._dispatch_device_state(event.device_id, event.parameters) is None:
+        # skip_if_unchanged=True: the player forwards every scenario tick's
+        # event regardless of whether the value changed (a scenario export
+        # repeats each device's last value every ~1s for the whole show,
+        # see data/scenarios/salam.json) -- skipping the actual driver
+        # write here when nothing changed avoids hammering the bus with it.
+        if self._dispatch_device_state(event.device_id, event.parameters, skip_if_unchanged=True) is None:
             logger.warning("zone %s: event for unregistered device %s", self.zone_id, event.device_id)
 
-    def _dispatch_device_state(self, device_id: str, parameters: dict) -> tuple[str, str] | None:
+    def _dispatch_device_state(self, device_id: str, parameters: dict, skip_if_unchanged: bool = False) -> tuple[str, str] | None:
         """Shared by set_device_state (operator-triggered) and
         _handle_device_event (scenario-triggered): routing lookup,
         motor-watchdog registration, and global_speed/global_brightness
@@ -333,7 +338,13 @@ class ZoneRuntime:
         ZoneScenarioPlayer's watchdog force-stops it (Step 3 safety net).
         Returns the (instance_id, channel) routing on success, or None if
         the device or its instance isn't found -- callers decide how to
-        report that (raise vs. log-and-return)."""
+        report that (raise vs. log-and-return).
+
+        skip_if_unchanged only skips the driver write below, never the
+        watchdog refresh above it -- set_device_state/_reapply_live_devices
+        keep the default False since a manual test-fire must always write,
+        and _reapply_live_devices exists specifically to re-send an
+        "unchanged" value through a just-changed global multiplier."""
         routing = self.device_map.get(device_id)
         if not routing:
             return None
@@ -344,10 +355,10 @@ class ZoneRuntime:
 
         category = self.device_categories.get(device_id)
         parameters = dict(parameters)
-        # Stored BEFORE scaling mutates `parameters` below -- this is the
-        # BASE value set_global_brightness/_speed re-derives from when an
-        # operator changes the multiplier without a new scenario event
-        # ever touching this device again (see _reapply_live_devices).
+        # Compared against BELOW, then overwritten -- this is the BASE
+        # (unscaled) value set_global_brightness/_speed re-derives from,
+        # and what skip_if_unchanged diffs the new event against.
+        previous = self.device_last_parameters.get(device_id)
         self.device_last_parameters[device_id] = dict(parameters)
 
         if category == DeviceCategory.MOTOR:
@@ -356,6 +367,10 @@ class ZoneRuntime:
             else:
                 self.player.mark_device_inactive(device_id)
 
+        if skip_if_unchanged and previous == parameters:
+            return instance_id, channel
+
+        if category == DeviceCategory.MOTOR:
             if self.global_speed != 1.0 and "frequency" in parameters:
                 parameters["frequency"] = parameters["frequency"] * self.global_speed
 
