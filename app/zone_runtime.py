@@ -25,7 +25,6 @@ class ZoneRuntime:
         self.device_map: dict[str, tuple[str, str]] = {}  # device_id -> (instance_id, channel)
         self.device_categories: dict[str, DeviceCategory] = {}
         self.device_nozzle_info: dict[str, tuple[str, int]] = {}  # device_id -> (nozzle_group, inverter 1|2), motor devices only
-        self.device_model_nodes: dict[str, str] = {}  # device_id -> named node in the zone's 3D preview model, set via SET_DEVICE_MODEL_NODE
         # device_id -> last BASE (pre-global-scaling) parameters, so set_global_brightness/_speed can re-derive and re-send live devices against a new multiplier.
         self.device_last_parameters: dict[str, dict] = {}
 
@@ -138,19 +137,8 @@ class ZoneRuntime:
         self.device_map.pop(device_id, None)
         self.device_categories.pop(device_id, None)
         self.device_nozzle_info.pop(device_id, None)
-        self.device_model_nodes.pop(device_id, None)
         self.device_last_parameters.pop(device_id, None)
         self.player.mark_device_inactive(device_id)
-
-    def set_device_model_node(self, device_id: str, model_node: str | None) -> bool:
-        """Authoring-time only -- assigns/clears which 3D preview node this device animates. Returns False for an unknown device_id so the caller can report a failed Ack instead of silently no-op'ing."""
-        if device_id not in self.device_map:
-            return False
-        if model_node:
-            self.device_model_nodes[device_id] = model_node
-        else:
-            self.device_model_nodes.pop(device_id, None)
-        return True
 
     # -- lifecycle --------------------------------------------------------------
 
@@ -172,7 +160,6 @@ class ZoneRuntime:
         self.device_map.clear()
         self.device_categories.clear()
         self.device_nozzle_info.clear()
-        self.device_model_nodes.clear()
         self.device_last_parameters.clear()
 
     async def emergency_stop(self) -> None:

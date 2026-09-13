@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from app import main
-from app.protocol import ReconnectInstance, ResetMotorFault, SetDeviceModelNode, SetDeviceState
+from app.protocol import ReconnectInstance, ResetMotorFault, SetDeviceState
 
 
 @pytest.fixture(autouse=True)
@@ -36,10 +36,4 @@ async def test_set_device_state_on_unknown_zone_raises_and_creates_no_zone() -> 
 async def test_reset_motor_fault_on_unknown_zone_raises_and_creates_no_zone() -> None:
     with pytest.raises(RuntimeError, match="unknown zone"):
         await main._dispatch(ResetMotorFault(zone_id=99, device_id="M1"))
-    assert 99 not in main.zones
-
-
-async def test_set_device_model_node_on_unknown_zone_raises_and_creates_no_zone() -> None:
-    with pytest.raises(RuntimeError, match="unknown zone"):
-        await main._dispatch(SetDeviceModelNode(zone_id=99, device_id="V1", model_node="Farsunka.005"))
     assert 99 not in main.zones

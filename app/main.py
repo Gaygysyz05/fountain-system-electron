@@ -166,7 +166,6 @@ async def get_zones() -> list[dict]:
                 "category": zone.device_categories[device_id].value,
                 "nozzle_group": zone.device_nozzle_info.get(device_id, (None, None))[0],
                 "nozzle_inverter": zone.device_nozzle_info.get(device_id, (None, None))[1],
-                "model_node": zone.device_model_nodes.get(device_id),
             }
             for device_id, (instance_id, channel) in zone.device_map.items()
         ]
@@ -447,13 +446,6 @@ async def _dispatch(cmd) -> None:  # noqa: ANN001 - discriminated union, see app
                 raise RuntimeError(f"unknown zone {cmd.zone_id}")
             if not await zones[cmd.zone_id].reset_motor_fault(cmd.device_id):
                 raise RuntimeError(f"fault reset failed for '{cmd.device_id}'")
-
-        case "SET_DEVICE_MODEL_NODE":
-            if cmd.zone_id not in zones:  # see RECONNECT_INSTANCE above
-                raise RuntimeError(f"unknown zone {cmd.zone_id}")
-            if not zones[cmd.zone_id].set_device_model_node(cmd.device_id, cmd.model_node):
-                raise RuntimeError(f"unknown device '{cmd.device_id}'")
-            await persistence.save_installation(zones)
 
 
 def run() -> None:

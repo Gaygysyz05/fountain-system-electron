@@ -82,7 +82,6 @@ async def save_installation(zones: dict[int, ZoneRuntime]) -> None:
                         "device_id": device_id, "instance_id": instance_id, "channel": channel,
                         "nozzle_group": zone.device_nozzle_info.get(device_id, (None, None))[0],
                         "nozzle_inverter": zone.device_nozzle_info.get(device_id, (None, None))[1],
-                        "model_node": zone.device_model_nodes.get(device_id),
                     }
                     for device_id, (instance_id, channel) in zone.device_map.items()
                 ],
@@ -130,8 +129,6 @@ async def load_installation(get_zone: Callable[[int], ZoneRuntime]) -> list[tupl
                 device["device_id"], device["instance_id"], device["channel"],
                 device.get("nozzle_group"), device.get("nozzle_inverter"),
             )
-            if device.get("model_node"):
-                zone.set_device_model_node(device["device_id"], device["model_node"])
 
     logger.info("loaded installation config: %d zone(s)", len(payload.get("zones", [])))
     return pending_connects

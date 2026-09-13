@@ -385,41 +385,6 @@ async def test_disconnect_stops_the_scenario_players_watchdog_task() -> None:
     assert watchdog_task.done()
 
 
-async def test_set_device_model_node_assigns_and_clears() -> None:
-    bus = EventBus()
-    zone = ZoneRuntime(zone_id=1, bus=bus)
-    motor = FakeDriverInstance(DeviceCategory.MOTOR)
-    _register_fake_instance(zone, "inv1", motor)
-    await zone.add_device("M1", "inv1", "1")
-
-    assert zone.set_device_model_node("M1", "Farsunka.005") is True
-    assert zone.device_model_nodes["M1"] == "Farsunka.005"
-
-    assert zone.set_device_model_node("M1", None) is True
-    assert "M1" not in zone.device_model_nodes
-
-
-async def test_set_device_model_node_unknown_device_returns_false() -> None:
-    bus = EventBus()
-    zone = ZoneRuntime(zone_id=1, bus=bus)
-
-    assert zone.set_device_model_node("does-not-exist", "Farsunka.005") is False
-    assert zone.device_model_nodes == {}
-
-
-async def test_remove_device_clears_model_node_mapping() -> None:
-    bus = EventBus()
-    zone = ZoneRuntime(zone_id=1, bus=bus)
-    motor = FakeDriverInstance(DeviceCategory.MOTOR)
-    _register_fake_instance(zone, "inv1", motor)
-    await zone.add_device("M1", "inv1", "1")
-    zone.set_device_model_node("M1", "Farsunka.005")
-
-    zone.remove_device("M1")
-
-    assert "M1" not in zone.device_model_nodes
-
-
 async def test_add_driver_instance_uses_the_schema_default_total_channels() -> None:
     """total_channels defaults to 32 on ModbusValveConfig when the raw
     config omits it entirely -- a real operator flow (the config form only
