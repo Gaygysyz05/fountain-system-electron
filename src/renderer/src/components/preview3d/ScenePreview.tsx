@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
@@ -12,13 +12,6 @@ const MODEL_URL = "./models/fountain.gltf";
 
 // Target size the model's bounding box is normalized to, regardless of the model's own modeled units/scale.
 const TARGET_SIZE = 6;
-
-/** Zone label grid position, centralized so future per-fountain geometry can reuse this layout. */
-function gridPosition(index: number): [number, number, number] {
-  const col = index % 4;
-  const row = Math.floor(index / 4);
-  return [col * 1.8 - 2.7, 0, row * 1.8];
-}
 
 /** Hand-rolled instead of @react-three/drei's <OrbitControls> to avoid drei's ~14MB of unrelated transitive deps (mediapipe, hls.js). */
 function CameraControls(): null {
@@ -115,25 +108,14 @@ function FountainModel({ onError }: { onError: (message: string) => void }): JSX
   return model ? <primitive object={model} /> : null;
 }
 
-/** Zone labels keep the grid layout since the model has no identifiable per-zone parts to anchor to; zone list comes from configStore (daemon-configured), not zonesStore -- see Sidebar.tsx. */
 export function ScenePreview(): JSX.Element {
   const configuredZones = useConfigStore((s) => s.zones);
   const loadZones = useConfigStore((s) => s.loadZones);
-  const labelRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const [modelError, setModelError] = useState<string | null>(null);
 
   useEffect(() => {
     void loadZones();
   }, [loadZones]);
-
-  const zoneEntries = useMemo(
-    () =>
-      configuredZones
-        .map((z) => z.zone_id)
-        .sort((a, b) => a - b)
-        .map((zoneId, index) => ({ zoneId, position: gridPosition(index) })),
-    [configuredZones],
-  );
 
   return (
     <div className="relative flex-1 overflow-hidden bg-bg-base">
@@ -144,27 +126,10 @@ export function ScenePreview(): JSX.Element {
         <gridHelper args={[20, 20, "#464647", "#2d2d30"]} />
         <SceneEnvironment />
         <FountainModel onError={setModelError} />
-        <ZoneLabelSync zoneEntries={zoneEntries} labelRefs={labelRefs} />
         <CameraControls />
       </Canvas>
 
-      <div className="pointer-events-none absolute inset-0">
-        {zoneEntries.map(({ zoneId }) => (
-          <div
-            key={zoneId}
-            ref={(el) => {
-              if (el) labelRefs.current.set(zoneId, el);
-              else labelRefs.current.delete(zoneId);
-            }}
-            style={{ left: 0, top: 0 }}
-            className="absolute whitespace-nowrap rounded-control border border-border bg-bg-surface1 px-xs py-0.5 text-xs font-medium text-text-secondary"
-          >
-            Zone {zoneId}
-          </div>
-        ))}
-      </div>
-
-      {zoneEntries.length === 0 && (
+      {configuredZones.length === 0 && (
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <p className="text-sm text-text-disabled">No zones configured yet -- add one on the Devices tab first.</p>
         </div>
@@ -177,38 +142,4 @@ export function ScenePreview(): JSX.Element {
       )}
     </div>
   );
-}
-
-/** Writes projected screen position straight into each label div's style via ref, bypassing React state since this runs every frame during orbit. */
-function ZoneLabelSync({
-  zoneEntries,
-  labelRefs,
-}: {
-  zoneEntries: Array<{ zoneId: number; position: [number, number, number] }>;
-  labelRefs: React.MutableRefObject<Map<number, HTMLDivElement>>;
-}): null {
-  const { camera, size } = useThree();
-  const vecRef = useRef(new THREE.Vector3());
-
-  useFrame(() => {
-    const vec = vecRef.current;
-    for (const { zoneId, position } of zoneEntries) {
-      const el = labelRefs.current.get(zoneId);
-      if (!el) continue;
-
-      vec.set(position[0], position[1] + 0.3, position[2]); // hover just above the grid
-      vec.project(camera);
-
-      if (vec.z > 1) {
-        el.style.display = "none"; // behind the camera -- OrbitControls can get here
-        continue;
-      }
-      el.style.display = "block";
-      const x = (vec.x * 0.5 + 0.5) * size.width;
-      const y = (-vec.y * 0.5 + 0.5) * size.height;
-      el.style.transform = `translate(-50%, -100%) translate(${x}px, ${y}px)`;
-    }
-  });
-
-  return null;
 }
