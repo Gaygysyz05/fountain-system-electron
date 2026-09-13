@@ -30,6 +30,8 @@ interface TimelineStore {
   redo: () => void;
 
   newScenario: (deviceIds: string[]) => void;
+  /** Replaces the editor wholesale with an already-built file (see musicGenerator.ts's "Generate from music" flow) -- unlike newScenario, this arrives with real events/duration/music_file already filled in, not an empty shell. */
+  loadGeneratedScenario: (file: ScenarioFile) => void;
   loadScenario: (scenarioId: string) => Promise<void>;
   /** Resolves true on success, false on failure -- callers use this instead
    * of racing the store's `error` field to decide whether to chain a
@@ -112,6 +114,9 @@ export const useTimelineStore = create<TimelineStore>((set, get) => ({
     }),
 
   newScenario: (deviceIds) => set({ scenarioId: "", file: emptyFile(deviceIds), dirty: false, error: null, past: [], future: [] }),
+
+  // scenarioId is cleared, same as newScenario -- a generated show is a fresh, unsaved file until the operator reviews and explicitly saves it, never a silent overwrite of whatever was loaded before.
+  loadGeneratedScenario: (file) => set({ scenarioId: "", file, dirty: true, error: null, past: [], future: [] }),
 
   loadScenario: async (scenarioId: string) => {
     set({ loading: true, error: null });

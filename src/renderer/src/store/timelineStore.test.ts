@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { useTimelineStore } from "./timelineStore";
-import type { ScenarioEvent } from "../lib/scenario";
+import type { ScenarioEvent, ScenarioFile } from "../lib/scenario";
 
 function seedEvents(events: ScenarioEvent[]): void {
   useTimelineStore.setState((s) => ({ file: { ...s.file, events, duration: 20 } }));
@@ -76,5 +76,29 @@ describe("commitChannelSpans", () => {
     seedEvents([{ id: "a", time: 1, device_id: "V2", parameters: { on: true } }]);
     useTimelineStore.getState().commitChannelSpans("V1", "on", [{ start: 2, end: 5 }]);
     expect(eventsFor("V2")).toHaveLength(1);
+  });
+});
+
+describe("loadGeneratedScenario", () => {
+  it("replaces the editor with the generated file, marks it dirty (unsaved), and clears undo history", () => {
+    seedEvents([{ id: "a", time: 1, device_id: "V1", parameters: { on: true } }]);
+    useTimelineStore.getState().commitChannelSpans("V1", "on", [{ start: 2, end: 5 }]); // populate `past` so we can check it gets cleared
+    useTimelineStore.setState({ scenarioId: "old-scenario" });
+
+    const generated: ScenarioFile = {
+      name: "song.mp3 (generated)",
+      duration: 180,
+      music_file: "C:\\music\\song.mp3",
+      events: [{ id: "gen-1", time: 0.5, device_id: "L1", parameters: { r: 255, g: 200, b: 120 } }],
+      deviceIds: [],
+    };
+    useTimelineStore.getState().loadGeneratedScenario(generated);
+
+    const state = useTimelineStore.getState();
+    expect(state.scenarioId).toBe(""); // a generated show is unsaved until the operator explicitly saves it
+    expect(state.file).toEqual(generated);
+    expect(state.dirty).toBe(true);
+    expect(state.past).toEqual([]);
+    expect(state.future).toEqual([]);
   });
 });

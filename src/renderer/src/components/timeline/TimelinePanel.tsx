@@ -10,6 +10,7 @@ import { useWheelStep } from "../../lib/useWheelStep";
 import { decodeAudioDuration } from "../../lib/waveform";
 import { DeviceCategoryTabs } from "./DeviceCategoryTabs";
 import { DeviceTablePanel } from "./DeviceTablePanel";
+import { GenerateFromMusicDialog } from "./GenerateFromMusicDialog";
 import { ScenarioDevicePicker } from "./ScenarioDevicePicker";
 import { SubTab } from "./SubTab";
 import { buildNozzleColumns, groupNozzlePairs } from "./deviceColumns";
@@ -44,6 +45,7 @@ export function TimelinePanel(): JSX.Element {
   const error = useTimelineStore((s) => s.error);
   const setError = useTimelineStore((s) => s.setError);
   const newScenario = useTimelineStore((s) => s.newScenario);
+  const loadGeneratedScenario = useTimelineStore((s) => s.loadGeneratedScenario);
   const loadScenario = useTimelineStore((s) => s.loadScenario);
   const saveScenario = useTimelineStore((s) => s.saveScenario);
   const setName = useTimelineStore((s) => s.setName);
@@ -58,6 +60,7 @@ export function TimelinePanel(): JSX.Element {
   const [selectedZoneId, setSelectedZoneId] = useState<number | null>(null);
   const [subView, setSubView] = useState<SubView>("valves");
   const [devicePicker, setDevicePicker] = useState<"new" | "edit" | null>(null);
+  const [showGenerateDialog, setShowGenerateDialog] = useState(false);
   // Transient "saved" confirmation -- the dirty dot disappearing is easy to miss; auto-clears rather than lingering until the next click.
   const [justSaved, setJustSaved] = useState(false);
 
@@ -255,6 +258,15 @@ export function TimelinePanel(): JSX.Element {
         </button>
 
         <button
+          disabled={!selectedZone}
+          onClick={() => confirmDiscard() && setShowGenerateDialog(true)}
+          title={selectedZone ? undefined : "Select a zone first"}
+          className="h-control rounded-control border border-border bg-bg-surface3 px-md text-sm text-text-primary hover:bg-bg-surface2 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          🎵 Generate…
+        </button>
+
+        <button
           disabled={!scenarioId || saving}
           onClick={async () => {
             if (!scenarioId) return;
@@ -351,6 +363,17 @@ export function TimelinePanel(): JSX.Element {
             setDevicePicker(null);
           }}
           onCancel={() => setDevicePicker(null)}
+        />
+      )}
+
+      {showGenerateDialog && selectedZone && (
+        <GenerateFromMusicDialog
+          zone={selectedZone}
+          onClose={() => setShowGenerateDialog(false)}
+          onGenerated={({ name, duration, musicFile, events }) => {
+            loadGeneratedScenario({ name, duration, music_file: musicFile, events, deviceIds: [] });
+            setShowGenerateDialog(false);
+          }}
         />
       )}
     </div>
