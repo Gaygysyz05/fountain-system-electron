@@ -4,19 +4,10 @@ import { zonePositions } from "../../lib/livePosition";
 import { useLiveTick } from "../../lib/useLiveTick";
 import { useConnectionStore } from "../../store/connectionStore";
 
-/**
- * Reads `zonePositions` (see lib/livePosition.ts) directly inside the
- * shared rAF loop (lib/useLiveTick.ts) and writes to the DOM through a
- * ref -- no React state, no re-render, even though this updates ~20 times
- * a second while a zone is playing. Same non-blocking pattern as
- * ScenePreview.tsx's useFrame, just driven by rAF instead of the R3F
- * render loop.
- */
+// Writes to the DOM via ref instead of React state to avoid re-rendering at the ~20/s rAF tick rate (same pattern as ScenePreview.tsx's useFrame).
 export function LiveTimecode({ zoneId, className }: { zoneId: number; className?: string }): JSX.Element {
   const ref = useRef<HTMLSpanElement>(null);
-  // See LiveProgressBar.tsx's comment -- same rarely-changing status read,
-  // same reason: a frozen timecode after a WS drop looks identical to a
-  // genuinely stalled show without this.
+  // Without this, a frozen timecode after a WS drop looks identical to a genuinely stalled show.
   const connected = useConnectionStore((s) => s.status === "open");
 
   useLiveTick(() => {

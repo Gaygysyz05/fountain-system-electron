@@ -4,25 +4,7 @@ import { isAck } from "./protocol";
 export type ConnectionStatus = "connecting" | "open" | "closed";
 
 const ACK_TIMEOUT_MS = 5000;
-// The first several seconds this client spends trying to connect are the
-// ONE moment reconnecting fast actually matters -- main/index.ts spawns
-// the daemon process alongside this renderer, so at EVERY app launch
-// there's a real window where nothing is listening on the WS port yet,
-// not because the daemon is down but because it simply hasn't finished
-// starting (Python interpreter + imports + binding the socket -- ~100-
-// 300ms in practice now that lifespan no longer blocks on hardware
-// connects, but dev-mode/first-launch overhead can push that out).
-// A WS connect attempt against a closed port costs nothing, so there's
-// no reason to back off during that window the way there is once the
-// daemon looks like it might genuinely be unreachable -- the original
-// flat 500ms-then-x1.5 schedule could take 4+ seconds to land its first
-// retry after the daemon actually became reachable, which read as the
-// daemon itself being slow when it was really just this client's own
-// backoff not catching up yet. Retries stay flat at
-// FAST_RECONNECT_DELAY_MS for the first FAST_RECONNECT_WINDOW_MS of
-// continuous failure, then fall back to the original exponential growth
-// (see scheduleReconnect) so a genuinely dead daemon doesn't get
-// hammered forever.
+// main/index.ts spawns the daemon alongside this renderer, so at launch the WS port is briefly closed (not down) while the daemon starts -- retry flat/fast here instead of the exponential backoff used once it looks genuinely unreachable, so startup doesn't misread as a slow daemon.
 const FAST_RECONNECT_DELAY_MS = 250;
 const FAST_RECONNECT_WINDOW_MS = 8_000;
 const MAX_RECONNECT_DELAY_MS = 10_000;
@@ -31,23 +13,12 @@ function makeId(): string {
   return crypto.randomUUID();
 }
 
-/**
- * Framework-agnostic WebSocket client for the fountain daemon. Deliberately
- * NOT a React hook: `device_event` messages can arrive at up to ~20Hz per
- * device while a scenario is playing (the daemon's tick is 50ms), and piping
- * every single one through a hook that re-renders its component tree would
- * be exactly the kind of main-thread jank this whole rewrite exists to
- * avoid. Zustand stores subscribe to `onEvent` below and decide for
- * themselves what's worth turning into a re-render (see zonesStore.ts) --
- * high-frequency consumers like the 3D preview read off refs instead of
- * store state entirely (see ScenePreview.tsx).
- */
+/** Deliberately not a React hook: device_event can arrive at ~20Hz per device, so re-rendering on every one would cause main-thread jank -- consumers subscribe via onEvent and decide what's worth a re-render (see zonesStore.ts, ScenePreview.tsx). */
 export class DaemonClient {
   private ws: WebSocket | null = null;
   private url: string;
   private status: ConnectionStatus = "closed";
-  // Only used once FAST_RECONNECT_WINDOW_MS of continuous failure has
-  // elapsed -- see scheduleReconnect and the constants above.
+  // Only used once FAST_RECONNECT_WINDOW_MS of continuous failure has elapsed (see scheduleReconnect).
   private reconnectDelay = 500;
   private reconnectingSince: number | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -65,15 +36,7 @@ export class DaemonClient {
     this.intentionallyClosed = false;
     const previous = this.ws;
     this.openSocket();
-    // Close the outgoing socket only AFTER openSocket() has already
-    // repointed `this.ws` at the new one -- a repeat connect() call (a
-    // remounted effect, React 18 StrictMode's dev-mode double-invoke, any
-    // future caller doing the same) used to just abandon whatever socket
-    // was already open/connecting, leaking one more live WebSocket per
-    // repeat call instead of closing it. Closing it BEFORE the reassignment
-    // would instead make ITS OWN onclose see isCurrent() still true and
-    // incorrectly schedule a reconnect that races the fresh connection
-    // openSocket() just started -- see openSocket()'s isCurrent() comment.
+    // Close the old socket only AFTER openSocket() repoints this.ws -- closing it first would make its own onclose see isCurrent() still true and schedule a reconnect that races the new connection (see openSocket()'s isCurrent() comment).
     previous?.close();
   }
 
@@ -119,16 +82,7 @@ export class DaemonClient {
     const ws = new WebSocket(this.url);
     this.ws = ws;
 
-    // Every handler below checks `this.ws !== ws` before touching shared
-    // state: if connect() is ever called again while this socket is still
-    // CONNECTING/CLOSING (React 18 StrictMode double-invokes effects in
-    // dev -- connect/disconnect/connect back to back -- and any future
-    // caller that does the same), this closure still fires for the socket
-    // that `this.ws` no longer points at. Without the guard, a late
-    // `onclose` from that superseded socket would call scheduleReconnect()
-    // and race a second live connection against the current one, or a late
-    // `onmessage` would resolve/dispatch against state a newer socket
-    // already owns.
+    // Guards against a superseded socket's late onclose/onmessage racing a reconnect or dispatching against state a newer socket already owns (e.g. StrictMode's double-invoked effects).
     const isCurrent = (): boolean => this.ws === ws;
 
     ws.onopen = () => {
@@ -169,8 +123,7 @@ export class DaemonClient {
     };
 
     ws.onerror = () => {
-      // onclose always follows onerror for a browser WebSocket; reconnect is
-      // scheduled there, not here, to avoid double-scheduling.
+      // onclose always follows onerror for a browser WebSocket; reconnect is scheduled there to avoid double-scheduling.
     };
   }
 

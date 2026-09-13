@@ -1,14 +1,6 @@
-/**
- * Hand-written TypeScript mirror of fountain-daemon/app/protocol.py.
- * Keep these two files in sync manually for now; if the protocol grows past
- * a handful of message types, generate this from the Pydantic schema
- * instead (e.g. via `pydantic.TypeAdapter(...).json_schema()` + a
- * json-schema-to-typescript step) rather than hand-syncing indefinitely.
- */
+/** Hand-written mirror of fountain-daemon/app/protocol.py -- keep in sync manually unless the protocol outgrows hand-syncing, then generate from the Pydantic schema instead. */
 
-// Matches app.drivers.base.DeviceCategory exactly. A "nozzle" is not a
-// category -- it's two motor devices grouped at authoring time, not
-// something the daemon's driver registry or protocol needs to know about.
+// Matches app.drivers.base.DeviceCategory; "nozzle" is just two motor devices grouped at authoring time, not a real category.
 export type DeviceType = "valve" | "motor" | "light";
 export type Subsystem = DeviceType | "daemon";
 export type Severity = "info" | "warning" | "critical";
@@ -117,30 +109,21 @@ export interface EmergencyStopCommand extends CommandBase {
   zone_id?: number | null;
 }
 
-/** Clears a tripped VFD fault (overcurrent, etc.) so the drive accepts run
- * commands again -- see app/protocol.py's ResetMotorFault. Only meaningful
- * for a motor-category device_id; the daemon Acks(ok=false) otherwise. */
+/** Clears a tripped VFD fault so the drive accepts run commands again; only meaningful for a motor device_id, else the daemon Acks(ok=false). */
 export interface ResetMotorFaultCommand extends CommandBase {
   command: "RESET_MOTOR_FAULT";
   zone_id: number;
   device_id: string;
 }
 
-/** Forces an immediate reconnect attempt for one driver instance instead of
- * waiting for its background watchdog's next pass -- see
- * app/protocol.py's ReconnectInstance. The outcome shows up as a
- * ConnectionStateEvent/HardwareErrorEvent like any other connect attempt,
- * not as this command's own ok/error. */
+/** Forces an immediate reconnect instead of waiting for the watchdog; outcome arrives via ConnectionStateEvent/HardwareErrorEvent, not this command's ok/error. */
 export interface ReconnectInstanceCommand extends CommandBase {
   command: "RECONNECT_INSTANCE";
   zone_id: number;
   instance_id: string;
 }
 
-/** Applies parameters to one device right now, bypassing the scenario
- * player -- for testing a device from the Devices tab. Same parameter
- * shape a scenario event for that category would use ({on} for valve,
- * {frequency, active} for motor, {r,g,b} for light). */
+/** Applies parameters to one device immediately, bypassing the scenario player (used by the Devices tab); same parameter shape as a scenario event for that category. */
 export interface SetDeviceStateCommand extends CommandBase {
   command: "SET_DEVICE_STATE";
   zone_id: number;
@@ -193,10 +176,7 @@ export interface ZoneStatusEvent {
 export interface DeviceStateEvent {
   type: "device_event";
   zone_id: number;
-  /** NOT the operator-facing device_id from GET /zones -- an internal id
-   * the daemon's low-level controller fabricates from its own addressing
-   * (see app/protocol.py's DeviceStateEvent docstring). Use `instance_id` +
-   * `channel` to correlate against a ZoneConfigDto device entry instead. */
+  /** NOT the operator-facing device_id from GET /zones -- an internal id the controller fabricates; correlate via `instance_id` + `channel` instead. */
   device_id: string;
   instance_id: string;
   channel: string;
@@ -241,9 +221,7 @@ export function isAck(msg: IncomingMessage): msg is Ack {
 
 // -- REST: GET /drivers -------------------------------------------------------
 
-/** One entry per registered driver (app/drivers/base.py's DriverDescriptor).
- * `config_schema` is a JSON Schema object -- render the add-device form from
- * it rather than hardcoding fields per driver_type. */
+/** One entry per registered driver; render the add-device form from `config_schema` rather than hardcoding fields per driver_type. */
 export interface DriverDescriptorDto {
   driver_type: string;
   category: DeviceType;
@@ -266,9 +244,7 @@ export interface DeviceDto {
   instance_id: string;
   channel: string;
   category: DeviceType;
-  // Only meaningful for a motor-category device that's one of a nozzle's
-  // two inverters (the reference app's Nozzle model -- see
-  // component_tables_nozzle.py). null/undefined for every other device.
+  // Only meaningful for a motor device that's one of a nozzle's two inverters; null/undefined otherwise.
   nozzle_group?: string | null;
   nozzle_inverter?: 1 | 2 | null;
 }
@@ -279,9 +255,7 @@ export interface ZoneConfigDto {
   name?: string | null;
   driver_instances: DriverInstanceDto[];
   devices: DeviceDto[];
-  /** Current live-control multipliers (0-100), runtime-only on the daemon
-   * (never persisted) -- this is how the HMI's brightness/speed sliders
-   * learn the real current value on load/reconnect instead of assuming 100. */
+  /** Runtime-only multipliers (0-100), never persisted -- lets the HMI sliders learn the real value on load/reconnect instead of assuming 100. */
   global_brightness: number;
   global_speed: number;
 }
@@ -296,8 +270,7 @@ export interface ScenarioDto {
 
 // -- REST: /schedule -----------------------------------------------------------
 
-/** Matches app/persistence.py's ScheduleEntryDto. `time` is "HH:MM" 24h
- * local time; `days` is 0=Monday..6=Sunday, empty = every day. */
+/** `time` is "HH:MM" 24h local; `days` is 0=Monday..6=Sunday, empty = every day. */
 export interface ScheduleEntryDto {
   id: string;
   zone_id: number;
@@ -318,9 +291,7 @@ export interface ScheduleEntryInput {
 
 // -- REST: GET /audit -----------------------------------------------------------
 
-/** Matches app/persistence.py's audit log entry shape -- what command ran,
- * when, and whether it succeeded. There's no operator-identity system on
- * this single shared panel, so this answers "what happened", not "who". */
+/** Answers "what happened", not "who" -- there's no operator-identity system on this shared panel. */
 export interface AuditLogEntryDto {
   ts: string;
   command: string;

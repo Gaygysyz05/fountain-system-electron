@@ -23,30 +23,12 @@ const CATEGORY_BY_SUBVIEW: Record<Exclude<SubView, "nozzles">, DeviceType> = {
   light: "light",
 };
 
-/** Scenario ids become filenames directly on the daemon (see
- * persistence.py's `_SAFE_SCENARIO_ID = ^[A-Za-z0-9_-]+$`) -- this must
- * only ever produce characters that pattern accepts. */
+/** Scenario ids become filenames on the daemon (persistence.py's `_SAFE_SCENARIO_ID = ^[A-Za-z0-9_-]+$`) -- must only ever produce characters that pattern accepts. */
 function slugify(name: string): string {
   return name.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "scenario";
 }
 
-/**
- * Authoring screen for one scenario file -- 1:1 with component_tables.py's
- * table set (Valves / Motors / Nozzles / Light, each a dense per-device,
- * per-time-step spreadsheet: click-to-toggle + inline edit + bulk ops +
- * pattern generators), just restyled. Valves/Motors/Light each further
- * split into a sub-tab per driver instance when a category spans more than
- * one physical board (DeviceCategoryTabs.tsx). Nozzles is its own case --
- * a nozzle is two motor-category devices paired by nozzle_group (set on
- * the Devices tab), not a device category of its own, so it bypasses
- * DeviceCategoryTabs and renders straight through DeviceTablePanel with
- * columns built by buildNozzleColumns. Motor-category devices that ARE paired
- * into a nozzle are excluded from the Motors tab -- they show only in
- * Nozzles, matching the reference app's separate `motors`/`nozzles` lists.
- * All views edit the same in-memory timelineStore; the toolbar
- * (name/duration/save/load/undo/device-selection) is shared since they're
- * views onto one scenario, not separate documents.
- */
+/** Authoring screen for one scenario file; Nozzles isn't its own device category -- it's motor devices paired by nozzle_group, so paired motors are excluded from the Motors tab and shown only here. */
 export function TimelinePanel(): JSX.Element {
   const zones = useConfigStore((s) => s.zones);
   const loadZones = useConfigStore((s) => s.loadZones);
@@ -54,15 +36,7 @@ export function TimelinePanel(): JSX.Element {
   const loadScenarios = useScenariosStore((s) => s.loadScenarios);
   const deleteScenario = useScenariosStore((s) => s.deleteScenario);
 
-  // Individual selectors, not the whole-store `useTimelineStore()` this
-  // used to be -- that subscribed to every field the store will EVER have
-  // (including ones this component doesn't read, like `loading`), so it
-  // re-rendered on every single store write regardless of relevance. Each
-  // re-render passes fresh, unmemoized `columns`/`instances` arrays down
-  // through DeviceCategoryTabs into DeviceTable, whose own effect resets
-  // grid selection/in-progress edits whenever `columns` changes identity
-  // (see DeviceTable.tsx) -- so an update that had nothing to do with the
-  // grid at all could still wipe whatever the operator was doing there.
+  // Individual selectors, not the whole store -- that re-rendered on every write regardless of relevance, and DeviceTable resets grid selection whenever `columns` changes identity (see DeviceTable.tsx), wiping in-progress edits.
   const scenarioId = useTimelineStore((s) => s.scenarioId);
   const file = useTimelineStore((s) => s.file);
   const dirty = useTimelineStore((s) => s.dirty);
@@ -84,15 +58,10 @@ export function TimelinePanel(): JSX.Element {
   const [selectedZoneId, setSelectedZoneId] = useState<number | null>(null);
   const [subView, setSubView] = useState<SubView>("valves");
   const [devicePicker, setDevicePicker] = useState<"new" | "edit" | null>(null);
-  // Transient "saved" confirmation next to the Save button -- the only
-  // other feedback a successful save gives is the dirty dot disappearing,
-  // easy to miss. Cleared automatically, not on next click, so it always
-  // reads as "that last click worked" rather than lingering indefinitely.
+  // Transient "saved" confirmation -- the dirty dot disappearing is easy to miss; auto-clears rather than lingering until the next click.
   const [justSaved, setJustSaved] = useState(false);
 
-  // Scroll-to-adjust for Duration -- whoever is timing a scenario against a
-  // music track ends up nudging this field constantly; typing a number
-  // every time is slower than just scrolling over it.
+  // Scroll-to-adjust for Duration -- scenarios are timed against music, so this field gets nudged constantly.
   const durationInputRef = useRef<HTMLInputElement>(null);
   useWheelStep(durationInputRef, (direction) => setDuration(Math.max(1, file.duration + direction)));
 
@@ -123,8 +92,7 @@ export function TimelinePanel(): JSX.Element {
     if (selectedZoneId === null && zones.length > 0) setSelectedZoneId(zones[0].zone_id);
   }, [zones, selectedZoneId]);
 
-  // Closing/reloading the window with unsaved edits used to lose them
-  // silently -- `dirty` was already tracked, just never used as a guard.
+  // Guards against closing/reloading the window with unsaved edits.
   useEffect(() => {
     function onBeforeUnload(e: BeforeUnloadEvent): void {
       if (!dirty) return;
@@ -135,9 +103,7 @@ export function TimelinePanel(): JSX.Element {
     return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, [dirty]);
 
-  /** New/Load both discard whatever's currently in the editor -- ask first
-   * if there are unsaved edits, same reasoning as the beforeunload guard
-   * above but for in-app navigation, which beforeunload can't catch. */
+  /** New/Load discard the editor's contents; beforeunload can't catch in-app navigation, so this asks separately. */
   function confirmDiscard(): boolean {
     return !dirty || window.confirm("You have unsaved changes. Discard them?");
   }
@@ -145,10 +111,7 @@ export function TimelinePanel(): JSX.Element {
   const selectedZone = zones.find((z) => z.zone_id === selectedZoneId) ?? null;
   const devices = selectedZone?.devices ?? [];
 
-  /** Blocking issues stop the save outright (shown as the toolbar error);
-   * warnings are things that would silently save "wrong" without this --
-   * a stale device reference, a scenario with nothing selected -- but
-   * aren't invalid enough to refuse, so they're a confirm() instead. */
+  /** Blocking issues refuse the save; warnings (stale device refs, nothing selected) would silently save "wrong" but aren't invalid enough to refuse, so they go through confirm() instead. */
   function validateBeforeSave(): { blocking: string | null; warnings: string[] } {
     if (!(file.duration > 0)) return { blocking: "Duration must be greater than 0 before saving.", warnings: [] };
 
@@ -164,10 +127,7 @@ export function TimelinePanel(): JSX.Element {
     return { blocking: null, warnings };
   }
 
-  // What the tabs actually show -- narrowed to the scenario's selected
-  // devices (resolveDeviceIds falls back to every zone device for a
-  // scenario that predates this feature, or a fresh one before the
-  // picker's been used, so this reproduces "show everything" by default).
+  // resolveDeviceIds falls back to every zone device when deviceIds is unset (pre-picker scenario, or a fresh one), so tabs show everything by default.
   const scenarioDevices = useMemo(() => {
     const ids = new Set(resolveDeviceIds(file.deviceIds, devices.map((d) => d.device_id)));
     return devices.filter((d) => ids.has(d.device_id));
@@ -219,20 +179,13 @@ export function TimelinePanel(): JSX.Element {
               const picked = await window.electron.selectMusicFile();
               if (!picked) return;
               setMusicFile(picked);
-              // Picking a track resets duration to match it -- the whole
-              // point of authoring against music, and the previous
-              // duration (often just the "New Scenario" default) had no
-              // relationship to the new track anyway. Still a plain
-              // editable field afterward, same as typing a number by hand.
+              // Picking a track resets duration to match it -- the previous value (often just the "New Scenario" default) had no relationship to the new track.
               try {
                 const bytes = await (await fetch(restClient.audioUrl(picked))).arrayBuffer();
                 const duration = await decodeAudioDuration(bytes);
                 if (duration > 0) setDuration(Math.round(duration * 100) / 100);
               } catch (err) {
-                // Duration sync is a convenience, not a requirement -- an
-                // unreadable/unsupported file still gets selected as the
-                // music_file, the operator just types the duration by hand
-                // like before this existed.
+                // Duration sync is a convenience, not a requirement -- an unreadable/unsupported file still gets selected as music_file.
                 console.warn("could not decode music duration:", err);
               }
             }}
@@ -323,14 +276,7 @@ export function TimelinePanel(): JSX.Element {
           disabled={saving}
           title={`Saves as "${slugify(file.name)}.json"`}
           onClick={async () => {
-            // The scenario name IS the id now -- no separate "save as id"
-            // field to keep in sync. Once a scenario has been saved once
-            // (scenarioId is set), further saves keep targeting that same
-            // file even if the name changes slightly, so routine edits
-            // never fork into a second file by accident. A rename that
-            // lands on a DIFFERENT id -- brand new scenario, or renamed to
-            // match some other saved scenario's name -- only overwrites
-            // that other file after an explicit confirm below.
+            // Once scenarioId is set, saves keep targeting that same file even if the name changes, so routine edits don't fork into a second file; only a rename onto a DIFFERENT existing id overwrites (after the confirm below).
             const id = scenarioId || slugify(file.name);
             const { blocking, warnings } = validateBeforeSave();
             if (blocking) {
@@ -371,11 +317,7 @@ export function TimelinePanel(): JSX.Element {
       </div>
 
       {subView === "nozzles" ? (
-        // Keyed by zone too, not just "nozzles" -- without it, switching
-        // zones while staying on this tab left DeviceTablePanel's own
-        // local state (Grid/Timeline mode, Step size) mounted across the
-        // switch, so Zone B silently opened already in whatever mode/step
-        // the operator last left Zone A in.
+        // Keyed by zone too -- otherwise DeviceTablePanel's local state (Grid/Timeline mode, Step size) survives a zone switch on this tab.
         <DeviceTablePanel
           key={`nozzles-${selectedZoneId}`}
           category="motor"
@@ -383,10 +325,7 @@ export function TimelinePanel(): JSX.Element {
           instances={(selectedZone?.driver_instances ?? []).filter((i) => i.category === "motor" && nozzleInstanceIds.has(i.instance_id))}
         />
       ) : (
-        // Same reasoning as above -- `subView` alone distinguishes tabs
-        // but not zones, so a category with exactly one driver instance in
-        // both the old and new zone (the common case) never remounted on
-        // a zone switch either.
+        // Same reasoning as above -- `subView` alone doesn't distinguish zones.
         <DeviceCategoryTabs
           key={`${subView}-${selectedZoneId}`}
           category={CATEGORY_BY_SUBVIEW[subView]}

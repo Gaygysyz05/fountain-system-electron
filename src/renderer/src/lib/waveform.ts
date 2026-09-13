@@ -1,19 +1,10 @@
-/**
- * Client-side audio decode for the timeline's waveform display -- entirely
- * browser-side (Web Audio API), no daemon involvement beyond serving the
- * raw file bytes (GET /audio). This is the "browser draws" half of the
- * daemon-plays-vs-browser-draws split from the audio architecture
- * discussion: authoring a scenario's timeline never needs the daemon to be
- * running audio playback, only to hand over the file.
- */
+/** Client-side audio decode (Web Audio API) for the timeline's waveform display, so authoring a scenario's timeline never needs the daemon actually running audio playback -- just serving the raw file bytes (GET /audio). */
 export interface WaveformPeaks {
   min: Float32Array;
   max: Float32Array;
 }
 
-/** Just the track's length in seconds -- same decode as decodeAudioPeaks
- * below, but the timeline's "Choose music" action only needs this part (to
- * set the scenario's duration to match), not the full peaks array. */
+/** Same decode as decodeAudioPeaks below, but "Choose music" only needs the duration (to set the scenario's duration), not the full peaks array. */
 export async function decodeAudioDuration(arrayBuffer: ArrayBuffer): Promise<number> {
   const AudioContextCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
   const audioContext = new AudioContextCtor();
@@ -25,9 +16,7 @@ export async function decodeAudioDuration(arrayBuffer: ArrayBuffer): Promise<num
   }
 }
 
-/** One min/max pair per output column, downsampled from the raw samples --
- * the standard "peaks" representation for rendering a waveform at a fixed
- * pixel width regardless of how long or high-sample-rate the source is. */
+/** One min/max pair per output column, downsampled from raw samples, so the waveform renders at a fixed width regardless of source duration/sample rate. */
 export async function decodeAudioPeaks(arrayBuffer: ArrayBuffer, columns: number): Promise<WaveformPeaks> {
   const AudioContextCtor = window.AudioContext ?? (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
   const audioContext = new AudioContextCtor();

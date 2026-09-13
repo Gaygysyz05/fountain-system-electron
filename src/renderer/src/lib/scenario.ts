@@ -1,16 +1,6 @@
 import type { DeviceType } from "./protocol";
 
-/**
- * Grid = the primary editor: dense per-device, per-time-step editing,
- * matching component_tables.py 1:1 (the reference PyQt6 app this HMI is
- * modernizing) -- a separate spreadsheet per device category, one column
- * per device, one row per time step, click-to-toggle + inline edit + bulk
- * ops + pattern generators. An earlier version of this editor also had a
- * Scene/Cue preset-library concept (named snapshots placed on a cue sheet);
- * that doesn't exist in the reference app at all and has been removed --
- * `events` (device_id + time + parameters) is the only authoring structure
- * now, same as what the daemon has always played directly.
- */
+/** Matches component_tables.py 1:1 (the reference app being modernized); `events` (device_id + time + parameters) is deliberately the only authoring structure -- no Scene/Cue preset library, since the reference app has none. */
 
 export interface ScenarioEvent {
   id: string;
@@ -27,23 +17,12 @@ export interface ScenarioFile {
   deviceIds: string[]; // which zone devices this scenario's editor tabs show -- see resolveDeviceIds
 }
 
-/** Resolves which zone devices the editor tabs should show for a scenario.
- * Empty/missing `deviceIds` -- an old scenario saved before this field
- * existed, or a brand new one before the picker has been used -- resolves
- * to every device currently in the zone, matching what the editor showed
- * unconditionally before this feature existed. Evaluated live against the
- * CURRENT zone device list (not a snapshot), so a device added to the zone
- * after a scenario was last saved still shows up in it. Deliberately NOT
- * derived from which devices appear in `events`: under "state persists
- * until changed" semantics a device that's always off may have zero
- * events yet still legitimately belong to the scenario. */
+/** Empty/missing `deviceIds` falls back to every device currently in the zone (old/new scenarios); deliberately NOT derived from `events`, since under "state persists until changed" semantics a device can legitimately belong with zero events. */
 export function resolveDeviceIds(deviceIds: string[], allZoneDeviceIds: string[]): string[] {
   return deviceIds.length > 0 ? deviceIds : allZoneDeviceIds;
 }
 
-/** What a freshly-added device state should default to, shaped to match
- * exactly what each driver's apply_state() expects (see
- * fountain-daemon/app/drivers/*.py). */
+/** Shaped to match exactly what each driver's apply_state() expects (see fountain-daemon/app/drivers/*.py). */
 export function defaultParametersFor(category: DeviceType): Record<string, unknown> {
   switch (category) {
     case "valve":
@@ -55,8 +34,7 @@ export function defaultParametersFor(category: DeviceType): Record<string, unkno
   }
 }
 
-/** One-line human-readable summary of a device's state -- used anywhere a
- * value needs to be scanned at a glance without opening an editor. */
+/** One-line human-readable summary of a device's state, for at-a-glance scanning without opening an editor. */
 export function summarizeState(category: DeviceType, parameters: Record<string, unknown>): string {
   switch (category) {
     case "valve":
@@ -77,15 +55,7 @@ export function summarizeState(category: DeviceType, parameters: Record<string, 
 
 // -- valve pattern generators ---------------------------------------------
 //
-// Directly answers "open only even valves, close odd" (a one-off bulk
-// assignment -- select the channels, pick On/Off, Apply) and "make some
-// kind of animation" (Alternate: a flashing pattern that flips every step)
-// -- the alternating pattern generator the original codebase had
-// (component_tables.py) and the very first audit flagged as "worth
-// keeping" but this project never got around to building until now.
-// (component_tables.py also had Wave/Cascade patterns -- a timed chase
-// and exactly-one-channel-on-at-a-time across the selection -- neither
-// carried over here.)
+// Only "constant" (bulk on/off) and "alternate" (flip-every-step flash) are implemented; component_tables.py's Wave/Cascade patterns were not carried over.
 
 export type ValvePatternType = "constant" | "alternate";
 
@@ -112,8 +82,7 @@ export function generateValvePattern(opts: ValvePatternOptions): Array<{ time: n
     return out;
   }
 
-  // "alternate": flips which half of deviceIds is on every step, producing a
-  // checkerboard flash across the selected channels for the whole range.
+  // Flips which half of deviceIds is on each step, producing a checkerboard flash across the selection.
   const step = Math.max(0.1, opts.stepInterval);
   let stepIndex = 0;
   for (let t = opts.startTime; t <= opts.endTime + 1e-9; t += step, stepIndex++) {

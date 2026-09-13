@@ -11,17 +11,7 @@ function roundTime(t: number): number {
   return Math.round(t * 10) / 10;
 }
 
-/** One line of "how to reach this board, and which physical board this
- * is" -- host/port and Slave ID are each one number for the whole
- * instance (see modbus_valve_driver.py's ModbusValveConfig), not
- * per-channel, so they're shown once here instead of repeated on every
- * column header. Slave ID matters specifically because several relay
- * boards can share one host:port (one RTU/TCP gateway, several boards on
- * the bus) -- device_config.py's original valve setup splits every 32
- * channels onto a new Slave ID for exactly this reason. Different driver
- * configs name the host/port fields differently (host/port vs
- * target_ip/target_port), so this checks both rather than assuming one
- * shape; slave_id is absent for drivers that don't use Modbus (Art-Net). */
+// Field names vary by driver (host/port vs target_ip/target_port) and slave_id is absent for non-Modbus drivers (Art-Net), so both are checked defensively.
 function connectionSummary(instance: DriverInstanceDto): string | null {
   const host = instance.config.host ?? instance.config.target_ip;
   const port = instance.config.port ?? instance.config.target_port;
@@ -32,9 +22,7 @@ function connectionSummary(instance: DriverInstanceDto): string | null {
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
-/** For each row time, the most recent event at or before it -- state
- * persists until changed, same rule the daemon's scheduler plays by.
- * `sortedEvents` must already be time-sorted. */
+// State persists until changed, matching the daemon's scheduler; `sortedEvents` must already be time-sorted.
 function computeEffectiveRow(sortedEvents: ScenarioEvent[], rowTimes: number[]): Array<Record<string, unknown> | undefined> {
   const result: Array<Record<string, unknown> | undefined> = [];
   let idx = 0;
@@ -49,26 +37,7 @@ function computeEffectiveRow(sortedEvents: ScenarioEvent[], rowTimes: number[]):
   return result;
 }
 
-/**
- * Renders one already-built set of columns (`columns`) as a table --
- * mirrors component_tables.py's per-type tables (FountainValveTableWidget
- * etc, each with its own time-step resolution), now further scoped to one
- * physical board by DeviceCategoryTabs.tsx when a category has more than
- * one instance. Column *building* (which devices, in what shape) is the
- * caller's job -- TimelinePanel.tsx/DeviceCategoryTabs.tsx pick
- * buildValveColumns/buildMotorColumns/buildLightColumns/buildNozzleColumns
- * depending on which tab this is -- this component only owns the
- * time-step size and computes the effective-state matrix DeviceTable
- * reads from (rows = time, columns = devices/channels -- see
- * DeviceTable.tsx). `category` is still needed here for DeviceTable's
- * default-parameters fallback -- Nozzles columns are motor-shaped
- * ({frequency, active}) even though the tab itself isn't literally
- * category "motor", so callers pass whichever category actually matches
- * the underlying parameter shape. The "Valve pattern…" advanced popover
- * stays valve-only, same scope the original had (Apply Pattern only
- * existed in FountainValveTableWidget's context menu, not the
- * motor/light/nozzle tables).
- */
+// `category` is passed separately from the already-built `columns` because DeviceTable needs it for its default-parameters fallback -- e.g. Nozzles columns are motor-shaped ({frequency, active}) even though the tab isn't literally category "motor".
 export function DeviceTablePanel({
   category,
   columns,
@@ -83,12 +52,7 @@ export function DeviceTablePanel({
 
   const [step, setStep] = useState(1);
   const [showPatternTool, setShowPatternTool] = useState(false);
-  // Grid stays the default every time this mounts -- an operator who's
-  // used this screen for months should see exactly what they've always
-  // seen unless they deliberately reach for Timeline. Valve-only for now,
-  // same scope PatternTool already has (a motor's "active" field could get
-  // this later, but its grid columns aren't purely toggle -- Hz shares the
-  // table -- so it needs its own look at how the two should coexist first).
+  // Defaults to grid on every mount so a returning operator sees the same view; timeline mode is valve-only for now since motor rows mix Hz with the toggle field.
   const [mode, setMode] = useState<"grid" | "timeline">("grid");
 
   const rowTimes = useMemo(() => {
@@ -119,28 +83,12 @@ export function DeviceTablePanel({
     return effectiveByDevice.get(deviceId)?.[rowIndex];
   }
 
-  /** Whether this device has an event stored at exactly this row's time --
-   * i.e. this row's value was deliberately set, not inherited from an
-   * earlier row via "state persists until changed". Used to cap edits so a
-   * single click only affects the row clicked instead of visually bleeding
-   * into every later row that has nothing of its own to stop at. */
+  // True only if this exact row has a stored event (not an inherited value); caps edits to the row clicked rather than bleeding into later rows.
   function hasExplicit(deviceId: string, rowIndex: number): boolean {
     return explicitTimes.has(`${deviceId}::${rowTimes[rowIndex]}`);
   }
 
-  // A relay has a minimum time between switches (ModbusValveConfig's
-  // min_toggle_interval -- the daemon already enforces it at playback
-  // time, throttling anything closer together than the hardware
-  // datasheet allows). The editor never enforced it, so it was possible
-  // to author a pattern that looks right on screen but gets silently
-  // slowed down when it actually plays. Flag it instead -- informational
-  // only, still lets you type it (maybe you'll widen the step later).
-  // Only meaningful for valves, and only when this table is scoped to
-  // exactly one instance (the normal case once DeviceCategoryTabs.tsx
-  // splits multi-board categories into per-board sub-tabs) -- a mixed-
-  // instance table (e.g. Nozzles spanning two gateways) has no single
-  // min_toggle_interval to check against, so it's skipped rather than
-  // guessed at.
+  // Flagged, not blocked: the daemon already throttles switches faster than min_toggle_interval at playback, so this just warns rather than guesses at a fix. Only checked for single-instance valve tables since a mixed-instance table has no single interval to check against.
   const minToggleInterval = category === "valve" && instances.length === 1 ? Number(instances[0].config.min_toggle_interval ?? 0) : 0;
 
   const flaggedCells = useMemo(() => {

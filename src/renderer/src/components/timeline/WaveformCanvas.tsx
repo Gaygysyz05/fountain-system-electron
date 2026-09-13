@@ -9,12 +9,7 @@ interface WaveformCanvasProps {
   height: number;
 }
 
-/**
- * Purely visual reference band under the ruler -- not interactive, doesn't
- * participate in click-to-add-event. Re-decodes whenever musicFile or width
- * changes (width changes when duration changes, since that's what the
- * timeline scales pixels-per-second against).
- */
+/** Non-interactive visual band; re-decodes on width change too, since duration changes rescale the timeline's px-per-second. */
 export function WaveformCanvas({ musicFile, width, height }: WaveformCanvasProps): JSX.Element | null {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
@@ -24,16 +19,7 @@ export function WaveformCanvas({ musicFile, width, height }: WaveformCanvasProps
     setError(null);
     if (!musicFile || width <= 0) return;
 
-    // AbortController, not just a `cancelled` flag -- a flag only stops
-    // this effect from ACTING on a superseded run's result, it doesn't
-    // stop the fetch/decode itself from running. Picking through several
-    // tracks quickly used to leave every earlier fetch (and, if it got far
-    // enough, the CPU-heavy peak decode) running to completion in the
-    // background for a result that was always going to be thrown away.
-    // Passing `signal` to fetch() cancels the network request outright;
-    // the explicit aborted checks below additionally skip starting the
-    // decode step at all for a fetch that finished right as this effect
-    // was already being torn down.
+    // AbortController (not a cancelled flag) actually cancels the in-flight fetch/CPU-heavy decode, not just this effect's reaction to it.
     const controller = new AbortController();
     setLoading(true);
 

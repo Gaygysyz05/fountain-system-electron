@@ -9,9 +9,7 @@ export interface MenuItem {
 
 export type MenuSection = MenuItem[];
 
-/** Small floating right-click menu -- replaces component_tables.py's
- * QMenu-per-table (Copy/Paste/"Set Selected.../"Apply Pattern"/Add-Remove).
- * Closes on outside click, Escape, or after any item fires. */
+/** Floating right-click menu replacing component_tables.py's per-table QMenu; closes on outside click, Escape, or after an item fires. */
 export function ContextMenu({
   x,
   y,
@@ -23,24 +21,12 @@ export function ContextMenu({
   y: number;
   sections: MenuSection[];
   onClose: () => void;
-  /** DeviceTable's right-click menus carry long labels ("Apply Pattern:
-   * Alternate", "Set Selected: Open (1)") that need the 192px default to
-   * read comfortably -- a short app-menu-style dropdown (see AppShell.tsx)
-   * looks like a mostly-empty box at that width for a label like
-   * "Settings", so it passes something tighter instead of inheriting a
-   * width sized for a different menu's content. */
+  /** Default (192px) fits DeviceTable's long labels; short menus like AppShell's pass something tighter so they don't look like an empty box. */
   minWidthClassName?: string;
 }): JSX.Element {
   const ref = useRef<HTMLDivElement>(null);
 
-  // A right-click near the window's right/bottom edge used to render the
-  // menu partially (or entirely) off-screen -- `x`/`y` are the raw click
-  // coordinates with no clamping against the actual viewport, easy to hit
-  // on this app's fullscreen kiosk layout with a wide device table. The
-  // menu's own size isn't known until it's rendered, so this measures and
-  // corrects via direct style mutation in a layout effect (runs before
-  // paint) rather than React state -- no visible jump from an initial
-  // off-screen position to the clamped one.
+  // Clamps raw click coords to the viewport after measuring the rendered menu; runs in a layout effect (before paint) to avoid a visible jump.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el) return;

@@ -4,26 +4,8 @@ import { useConfigStore } from "../../store/configStore";
 import { useDaemonStatusStore } from "../../store/daemonStatusStore";
 import { useZonesStore } from "../../store/zonesStore";
 
-/**
- * The "live metrics strip" pattern from the original PyQt6 apps' status bars
- * (pipe-delimited counts, refreshed live) is worth keeping -- it's the one
- * thing that already scaled fine regardless of zone/device count, since it
- * was always just `len(...)` of whatever collection existed.
- *
- * Counts come from configStore (actual configuration), not zonesStore (live
- * playback status) -- the latter only has entries for zones that have
- * played something this session, so it read "Zones: 0" even with a fully
- * configured zone sitting right there on the Devices/Scenes tabs. See
- * Sidebar.tsx for the same fix.
- */
-/**
- * A dropped WS connection could mean either "the daemon is fine, just a
- * network blip" or "the daemon child process is restarting/gave up
- * entirely" -- indistinguishable from the WS status dot alone. This turns
- * daemonStatusStore's phase into that missing context, shown only when
- * there's something to say (anything other than the steady-state "running"
- * -- see daemonStatusStore.ts for what pushes phase changes here).
- */
+/** Counts come from configStore (actual config), not zonesStore (live playback status) -- the latter only has entries for zones played this session, so it undercounts (e.g. "Zones: 0") for a configured-but-unplayed zone; see Sidebar.tsx for the same fix. */
+/** WS connection status alone can't distinguish a network blip from the daemon restarting/failing -- this surfaces daemonStatusStore's phase for that context, shown only when it's not the steady-state "running" (see daemonStatusStore.ts). */
 function daemonStatusLabel(status: DaemonStatus): string | null {
   switch (status.phase) {
     case "starting":
@@ -42,10 +24,7 @@ export function StatusBar(): JSX.Element {
   const lastError = useConnectionStore((s) => s.lastError);
   const configuredZones = useConfigStore((s) => s.zones);
   const daemonStatus = useDaemonStatusStore((s) => s.status);
-  // WS "open" (the TCP socket) is not the same claim as "the daemon's event
-  // loop is actually alive and pushing updates" -- a deadlocked daemon can
-  // leave the socket sitting open with nothing coming through it. See
-  // zonesStore.ts's staleness watcher for what actually sets this.
+  // WS "open" (the TCP socket) doesn't mean the daemon's event loop is alive -- a deadlocked daemon can leave the socket open with nothing coming through (see zonesStore.ts's staleness watcher, which sets this).
   const stale = useZonesStore((s) => s.stale);
   const zoneCount = configuredZones.length;
   const deviceCount = configuredZones.reduce((sum, z) => sum + z.devices.length, 0);

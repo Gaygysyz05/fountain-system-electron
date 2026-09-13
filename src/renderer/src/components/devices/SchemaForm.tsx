@@ -31,27 +31,14 @@ function defaultValueFor(prop: JsonSchemaProperty): unknown {
 function initialValues(schema: JsonSchema): Record<string, unknown> {
   const values: Record<string, unknown> = {};
   for (const [key, prop] of Object.entries(schema.properties ?? {})) {
-    // `config_schema` comes from the daemon's GET /drivers response --
-    // untrusted input as far as the renderer is concerned. A property
-    // literally named "__proto__" would, via this bracket assignment,
-    // reassign `values`'s own prototype instead of setting a normal
-    // field (JS's `__proto__` is a special accessor every plain object
-    // inherits from Object.prototype) -- skip it rather than let a
-    // malformed/malicious schema pollute this object's prototype chain.
+    // config_schema is untrusted (from the daemon's GET /drivers); skip "__proto__" so a malicious schema can't pollute this object's prototype via the bracket assignment below.
     if (key === "__proto__") continue;
     values[key] = defaultValueFor(prop);
   }
   return values;
 }
 
-/**
- * Renders an add-instance/add-device form directly from a driver's Pydantic
- * config model (as JSON Schema, from GET /drivers) -- no per-driver-type
- * form component to write or keep in sync. Handles the flat {string,
- * integer, number, boolean} shape every driver config in this codebase
- * uses; nested objects/arrays aren't supported because no driver needs them
- * yet -- extend here, not by special-casing a driver in the UI, if one ever does.
- */
+/** Renders an add-instance form directly from a driver's Pydantic config (as JSON Schema) so no per-driver-type form component is needed; only the flat {string,integer,number,boolean} shape is supported -- extend here, not with per-driver UI, if a driver ever needs nested config. */
 export function SchemaForm({ schema, onSubmit, submitLabel = "Add" }: SchemaFormProps): JSX.Element {
   const typedSchema = schema as JsonSchema;
   const properties = typedSchema.properties ?? {};
@@ -70,14 +57,7 @@ export function SchemaForm({ schema, onSubmit, submitLabel = "Add" }: SchemaForm
       className="flex flex-col gap-sm"
       onSubmit={(e) => {
         e.preventDefault();
-        // An optional number field left empty parses to NaN, which
-        // JSON.stringify silently turns into `null` -- that used to reach
-        // the daemon as an explicit null for a numeric config field instead
-        // of just being absent, which a required field's `required`
-        // attribute already blocks at the browser level, but nothing
-        // caught for an optional one. Dropping undefined keys here sends
-        // "not specified" instead, so the driver's own Pydantic default
-        // applies, same as if the operator had never seen this field.
+        // An empty optional number field parses to NaN, which JSON.stringify silently turns into `null`; dropping undefined keys here sends "not specified" instead, so the driver's own Pydantic default applies.
         const cleaned = Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined));
         onSubmit(cleaned);
       }}
@@ -107,8 +87,7 @@ export function SchemaForm({ schema, onSubmit, submitLabel = "Add" }: SchemaForm
               onChange={(e) => {
                 const raw = e.target.value;
                 if (raw === "") {
-                  // Cleared by the operator -- store as "not specified"
-                  // rather than NaN, see the submit handler above.
+                  // Cleared by the operator -- store as "not specified" rather than NaN (see submit handler above).
                   setField(key, undefined);
                   return;
                 }

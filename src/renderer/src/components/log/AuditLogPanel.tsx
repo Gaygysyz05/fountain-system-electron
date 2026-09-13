@@ -9,14 +9,7 @@ function formatTimestamp(iso: string): string {
   return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
 }
 
-/**
- * Read-only viewer for GET /audit -- there's no operator-identity system on
- * this single shared panel (see persistence.py's append_audit_entry), so
- * this answers "what happened and when", not "who". Useful for
- * reconstructing what led up to an incident after the fact. Plain
- * fetch-on-demand, not a live stream -- an incident review happens after
- * the fact, not while watching commands scroll by in real time.
- */
+/** Read-only, fetch-on-demand (no live stream) view of GET /audit; no operator-identity system exists, so this shows what happened, not who did it. */
 export function AuditLogPanel(): JSX.Element {
   const [entries, setEntries] = useState<AuditLogEntryDto[]>([]);
   const [loading, setLoading] = useState(false);
@@ -72,13 +65,7 @@ export function AuditLogPanel(): JSX.Element {
           </thead>
           <tbody>
             {entries.map((entry, i) => (
-              // AuditLogEntryDto carries no id of its own (see
-              // persistence.py's append_audit_entry) -- ts+command+i is a
-              // more stable key than the bare index alone, though the
-              // whole list is atomically replaced on every refresh anyway
-              // (no per-row local state or animation this table needs to
-              // preserve identity across), so this was never actually
-              // wrong in practice, just not the idiomatic key choice.
+              // AuditLogEntryDto has no id of its own, hence the composite key (list is fully replaced each refresh anyway, so this rarely matters).
               <tr key={`${entry.ts}-${entry.command}-${i}`} className="border-t border-border">
                 <td className="whitespace-nowrap px-sm py-xs font-mono text-xs text-text-secondary">{formatTimestamp(entry.ts)}</td>
                 <td className="px-sm py-xs text-text-primary">{entry.command}</td>

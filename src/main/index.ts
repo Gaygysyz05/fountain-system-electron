@@ -4,26 +4,12 @@ import { spawn, type ChildProcess } from "child_process";
 import { writeFile, readFile } from "fs/promises";
 import { is } from "@electron-toolkit/utils";
 
-// Plain `catch (err) { ... }` -> readable-string fallback -- was
-// duplicated inline at every catch block below. A separate process from
-// the renderer (own module graph, own build target per tsconfig.node.json),
-// so this is its own tiny copy rather than importing the renderer's
-// lib/errors.ts.
+// Own copy rather than importing the renderer's lib/errors.ts -- separate process, separate module graph/build target.
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-// -- app settings (this shell's own preferences, not the daemon's hardware
-// config) ---------------------------------------------------------------
-//
-// One small JSON file under userData -- not worth a dependency for a
-// single boolean today. Currently holds only whether the "start
-// automatically" default (below) has already been applied once; the
-// Settings screen's own reads/writes of the actual login-item state go
-// straight through app.getLoginItemSettings()/setLoginItemSettings(),
-// which is ALREADY the persisted, OS-level source of truth for that --
-// duplicating it into this file would just be a second copy that could
-// drift from what Windows actually has registered.
+// This shell's own preferences (not the daemon's); login-item state itself lives in Windows' own registered entry, not duplicated here, to avoid drift.
 interface AppSettings {
   autoLaunchDefaultApplied?: boolean;
 }
@@ -48,15 +34,7 @@ async function writeAppSettings(settings: AppSettings): Promise<void> {
   }
 }
 
-// -- log ring buffer -------------------------------------------------------
-//
-// Every [daemon] line already went to console.log/console.error, which is
-// fine for a developer running `electron-vite dev` in a terminal but
-// invisible to an operator on a site panel -- there's no terminal to look
-// at. Kept here (not in the renderer) because the daemon's own stdout/
-// stderr, spawn/restart lifecycle, and any daemon-unreachable state all
-// happen in THIS process; the renderer only ever sees the WS connection
-// drop, not why.
+// Kept here, not the renderer: daemon stdout/stderr and restart lifecycle happen in this process, so this is the only place that knows why the WS dropped.
 const MAX_LOG_LINES = 4000;
 const logBuffer: string[] = [];
 
@@ -65,21 +43,11 @@ function logLine(line: string): void {
   if (logBuffer.length > MAX_LOG_LINES) logBuffer.shift();
 }
 
-// One window, no fixed zone/device count baked in anywhere here -- the
-// renderer discovers everything (zones, devices, scenarios) from the daemon
-// over the WebSocket at runtime. See the Step 2/3 discussion: this app must
-// work identically for one fountain or many, so the shell has nothing to
-// know about topology.
+// No fixed zone/device count here -- the renderer discovers topology from the daemon at runtime, so this shell works unchanged for one fountain or many.
 
 let mainWindow: BrowserWindow | null = null;
 
-// A site panel can get double-launched (a stray desktop-icon double-click,
-// the auto-launch entry racing a manual start after a reboot) -- without
-// this, the second instance would spawn its OWN daemon child process too
-// (isDaemonAlreadyRunning's health-check race means it isn't guaranteed to
-// see the first instance's daemon in time), fighting over port 8765 and
-// the same Modbus/Art-Net links. requestSingleInstanceLock() makes the
-// second launch hand off to the first and exit immediately instead.
+// Prevents a double-launched instance from spawning its own daemon and fighting over port 8765 / the same Modbus/Art-Net links.
 const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.quit();
@@ -101,11 +69,7 @@ function createWindow(): void {
     show: false,
     backgroundColor: "#1e1e1e", // avoids a white flash before the renderer paints
     autoHideMenuBar: true,
-    // Fullscreen by default for a packaged build (a dedicated site panel --
-    // no window chrome, nothing for a stray touch/click to hit outside the
-    // app) but not while iterating with `electron-vite dev`, where it would
-    // just get in the way. F11 (below) toggles either way, so a site
-    // install is never actually stuck fullscreen.
+    // Fullscreen by default in a packaged build (dedicated site panel, no chrome for a stray touch to hit) but not in dev; F11 always toggles either way.
     fullscreen: !is.dev,
     webPreferences: {
       preload: join(__dirname, "../preload/index.js"),
@@ -117,37 +81,19 @@ function createWindow(): void {
     mainWindow?.show();
   });
 
-  // Without this, `mainWindow` keeps pointing at an already-destroyed
-  // BrowserWindow once the OS close button (or Alt+F4) fires -- the
-  // window itself is destroyed synchronously, but before-quit's graceful
-  // daemon shutdown can still be mid-flight for up to
-  // DAEMON_SHUTDOWN_TIMEOUT_MS afterward. Any code that runs during that
-  // gap and checks `if (mainWindow)` (second-instance's focus/restore,
-  // setDaemonStatus's webContents.send) would see a non-null but already-
-  // destroyed reference and throw "Object has been destroyed" instead of
-  // just skipping the no-longer-possible UI update.
+  // Clears the reference immediately: the window is destroyed synchronously here, but before-quit's graceful shutdown can still be mid-flight, and code checking `if (mainWindow)` during that gap would otherwise throw "Object has been destroyed".
   mainWindow.on("closed", () => {
     mainWindow = null;
   });
 
-  // F11 toggles fullscreen -- the standard OS convention for "let me out of
-  // this", which a fullscreen kiosk-style panel otherwise has no window
-  // border to grab for. Bound at the webContents level (before-input-event)
-  // rather than a renderer keydown handler so it works regardless of what
-  // element currently has focus.
+  // Bound at webContents level, not a renderer keydown handler, so F11 works regardless of what element has focus.
   mainWindow.webContents.on("before-input-event", (_event, input) => {
     if (input.type === "keyDown" && input.key === "F11") {
       mainWindow?.setFullScreen(!mainWindow.isFullScreen());
     }
   });
 
-  // Keep external links (if any ever appear, e.g. a "docs" link) in the
-  // system browser instead of navigating this Electron window to them.
-  // Restricted to http/https: window.open() is reachable from renderer code
-  // with a URL that isn't necessarily a hardcoded string (e.g. built from a
-  // driver's display_name or a device_id, both ultimately daemon-supplied)
-  // -- without this check, shell.openExternal would hand any scheme
-  // straight to the OS, including file:// or a custom protocol handler.
+  // Restricted to http/https: window.open()'s URL can be built from daemon-supplied data, and without this check shell.openExternal would hand any scheme (file://, a custom handler) straight to the OS.
   mainWindow.webContents.setWindowOpenHandler((details) => {
     try {
       const url = new URL(details.url);
@@ -167,20 +113,7 @@ function createWindow(): void {
   }
 }
 
-// -- daemon process management -------------------------------------------------
-//
-// Removes the "two terminals" friction: previously the operator had to start
-// fountain-daemon by hand in its own terminal before this app was any use.
-// Electron now spawns it, restarts it with backoff if it dies, and gives up
-// after a few tries rather than restart-looping forever (a crash that keeps
-// happening is a bug to go look at, not something to paper over).
-//
-// Dev-only for now: this assumes fountain-daemon is a sibling directory with
-// its own persistent venv (`fountain-daemon/.venv`), which is what exists on
-// this dev machine today. Packaging this daemon into a distributable build
-// (bundling a frozen interpreter, or a PyInstaller-built exe shipped as an
-// Electron extraResource) is a separate concern for actual site deployment,
-// not solved here.
+// Spawns fountain-daemon and restarts it with backoff, giving up after a few tries rather than restart-looping forever on a real bug.
 
 const DAEMON_HEALTH_URL = "http://127.0.0.1:8765/health";
 const MAX_DAEMON_RESTART_ATTEMPTS = 5;
@@ -190,15 +123,7 @@ let daemonProcess: ChildProcess | null = null;
 let daemonRestartAttempts = 0;
 let shuttingDown = false;
 
-// -- daemon status, surfaced to the renderer --------------------------------
-//
-// Previously this whole lifecycle (starting/restarting/gave-up) only ever
-// went to console.log in this process -- an operator on a site panel just
-// saw the WS connection drop with zero indication of whether it's about to
-// come back on its own, or needs someone to go look at it. Mirrors
-// wsClient.ts's ConnectionStatus pattern on the renderer side: last-known
-// value kept here (getDaemonStatus), plus a push on every change
-// (daemon-status), so a subscriber never has to guess whether it missed one.
+// Mirrors wsClient.ts's ConnectionStatus pattern: last-known value kept here plus a push on every change, so a subscriber never has to guess whether it missed one.
 export type DaemonStatus =
   | { phase: "starting" }
   | { phase: "running" }
@@ -237,45 +162,20 @@ interface DaemonLaunch {
 }
 
 function resolveDaemonPaths(): DaemonLaunch {
-  // A packaged build ships fountain-daemon.spec's frozen fountain-daemon.exe
-  // as an electron-builder extraResource (see electron-builder.yml) --
-  // no Python interpreter or `.venv` needs to exist on the target machine
-  // at all, which is the whole point of the .exe over spawning
-  // `python -m app.main` the way dev mode still does below.
+  // Packaged build ships a frozen fountain-daemon.exe (electron-builder extraResource) so no Python/.venv needs to exist on the target machine.
   if (app.isPackaged) {
     const exePath = join(process.resourcesPath, "fountain-daemon", "fountain-daemon.exe");
-    // NOT the exe's own resource directory: on a standard install (NSIS
-    // defaults to Program Files) that tree is owned by the installer, not
-    // the logged-in operator, and every ADD_DEVICE/scenario Save the daemon
-    // does is a write to `data/` under its cwd (see persistence.py's
-    // DATA_DIR) -- writing there fails with a permissions error the
-    // operator has no way to diagnose from a control panel with no
-    // terminal. userData (%APPDATA%/fountain-hmi on Windows) is always
-    // writable by whichever account is running the app, survives an
-    // upgrade/reinstall the same way an installed app's settings would,
-    // and is the same per-user directory Electron itself already uses for
-    // its own state.
+    // cwd is userData, not the exe's resource directory: NSIS installs under Program Files, which isn't writable by the operator, and the daemon writes to `data/` under its cwd (persistence.py's DATA_DIR).
     return { command: exePath, args: [], cwd: app.getPath("userData") };
   }
 
-  // __dirname, not app.getAppPath() -- the latter returns the directory of
-  // the nearest package.json walking up from the entry point, which is
-  // fountain-hmi's own root when launched via `electron-vite dev` (its dev
-  // server runs from there) but falls back to the entry SCRIPT's own
-  // directory (out/main) when there's no package.json to find there, e.g.
-  // launching the built output directly (`electron out/main/index.js`) --
-  // silently pointing this at out/fountain-daemon, which doesn't exist.
-  // __dirname is main/index.js's own compiled location in both cases:
-  // out/main, three levels below the fountain-hmi/fountain-daemon sibling pair.
+  // __dirname, not app.getAppPath(): the latter walks up to the nearest package.json, which can resolve to the wrong directory when launching built output directly.
   const daemonDir = resolve(__dirname, "..", "..", "..", "fountain-daemon");
   const python = join(daemonDir, ".venv", "Scripts", "python.exe");
   return { command: python, args: ["-m", "app.main"], cwd: daemonDir };
 }
 
-// Same folder persistence.py's resolve_music_path treats a relative
-// music_file as relative to -- so a file picked from here needs no typed
-// path at all, and one picked from elsewhere still works (as an absolute
-// path), just isn't portable if the project moves to another machine.
+// Matches the folder persistence.py's resolve_music_path treats a relative music_file as relative to.
 function resolveScenariosDir(): string {
   return join(resolveDaemonPaths().cwd, "data", "scenarios");
 }
@@ -296,11 +196,7 @@ ipcMain.handle("select-music-file", async () => {
 
   const picked = result.filePaths[0];
   const relativeToScenarios = relative(scenariosDir, picked);
-  // Inside the scenarios folder -- store the portable relative form (what
-  // resolve_music_path expects); anywhere else (or on Windows, a different
-  // drive -- relative() then returns an absolute path, hence the isAbsolute
-  // check), the absolute path still resolves fine, it just won't survive
-  // moving the project to another machine.
+  // Stores the portable relative form when inside scenarios/; the isAbsolute check catches Windows cross-drive paths, where relative() returns an absolute path instead of "..".
   const isInsideScenarios = !relativeToScenarios.startsWith("..") && !isAbsolute(relativeToScenarios);
   return isInsideScenarios ? relativeToScenarios : picked;
 });
@@ -317,8 +213,7 @@ async function isDaemonAlreadyRunning(): Promise<boolean> {
 async function startDaemon(): Promise<void> {
   if (shuttingDown) return;
 
-  // Someone may have started it by hand (as the operator was told to do
-  // before this existed) -- don't spawn a second one fighting for the port.
+  // Someone may have started it by hand -- don't spawn a second one fighting for the port.
   if (await isDaemonAlreadyRunning()) {
     logLine("[daemon] already running (started outside this app) -- not spawning another");
     setDaemonStatus({ phase: "running" });
@@ -340,8 +235,7 @@ async function startDaemon(): Promise<void> {
 
   proc.on("spawn", () => {
     setDaemonStatus({ phase: "running" });
-    // Ran long enough to count as healthy -- forgive earlier restart attempts
-    // so a rare crash after hours of uptime doesn't inherit an old backoff streak.
+    // Forgives earlier restart attempts once running long enough, so a rare crash after hours of uptime doesn't inherit an old backoff streak.
     const resetTimer = setTimeout(() => {
       daemonRestartAttempts = 0;
     }, DAEMON_HEALTHY_RESET_DELAY_MS);
@@ -355,10 +249,7 @@ async function startDaemon(): Promise<void> {
 
     daemonRestartAttempts += 1;
     if (daemonRestartAttempts > MAX_DAEMON_RESTART_ATTEMPTS) {
-      // MAX_DAEMON_RESTART_ATTEMPTS restarts happen AFTER the original
-      // launch, so the daemon was actually spawned MAX+1 times total by
-      // the time this fires -- said explicitly here so the log's own
-      // count doesn't undercount by one against what actually happened.
+      // Restarts happen after the original launch, so total launches is MAX+1 -- said explicitly so the log doesn't undercount by one.
       logLine(
         `[daemon] gave up after ${MAX_DAEMON_RESTART_ATTEMPTS} restart attempts ` +
           `(${MAX_DAEMON_RESTART_ATTEMPTS + 1} total launches) -- ` +
@@ -382,15 +273,7 @@ function stopDaemon(): void {
 
 const DAEMON_SHUTDOWN_TIMEOUT_MS = 3000;
 
-// daemonProcess.kill() alone used to be the whole shutdown path -- but on
-// Windows, Node delivers it in a way Python's asyncio signal handlers
-// aren't guaranteed to see in time to run lifespan's shutdown cleanup
-// (see main.py's POST /shutdown docstring), so a valve/motor/light active
-// when the operator just closes the window could be abandoned running.
-// This asks the daemon over HTTP to stop hardware FIRST -- something under
-// its own control regardless of how the OS handles the process exit --
-// then kills the process either way (a daemon that's already dead or
-// unreachable just hits the catch and falls through to the same kill()).
+// Asks the daemon over HTTP to stop hardware first, since on Windows Python's asyncio signal handlers aren't guaranteed to see kill() in time to run lifespan's shutdown cleanup (main.py's POST /shutdown) -- otherwise an active valve/motor/light could be left running.
 async function stopDaemonGracefully(): Promise<void> {
   if (!daemonProcess) return;
   try {
@@ -404,14 +287,7 @@ async function stopDaemonGracefully(): Promise<void> {
   stopDaemon();
 }
 
-// Packaged build only -- never touch the developer's own login items while
-// iterating via `electron-vite dev`. A power flicker or a Windows Update
-// reboot on the site PC would otherwise leave the fountain control panel
-// closed until someone walks over and starts it by hand -- so a fresh
-// install defaults to on. Only a DEFAULT, though: it must apply once and
-// then get out of the way, or an operator who deliberately turns this off
-// in Settings (below) would find it silently switched back on the very
-// next launch. autoLaunchDefaultApplied is the marker that's already happened.
+// Packaged build only, and applies once: autoLaunchDefaultApplied stops this from silently re-enabling itself after an operator deliberately turns it off in Settings.
 async function configureAutoLaunch(): Promise<void> {
   if (is.dev) return;
   const settings = await readAppSettings();
@@ -420,13 +296,7 @@ async function configureAutoLaunch(): Promise<void> {
   await writeAppSettings({ ...settings, autoLaunchDefaultApplied: true });
 }
 
-// Settings screen's auto-launch toggle -- app.getLoginItemSettings() IS the
-// persisted state (Windows' own registered startup entry), so "read" just
-// asks Electron, no local copy to keep in sync. Also reports `supported`:
-// in `electron-vite dev`, process.execPath is the dev Electron binary
-// itself, not this app -- registering THAT as a login item would silently
-// launch node_modules/electron.exe with no arguments on every boot, so the
-// write side no-ops and the renderer disables the toggle instead.
+// `supported: false` in dev, since process.execPath there is the dev Electron binary itself -- registering it as a login item would launch node_modules/electron.exe with no arguments on every boot.
 ipcMain.handle("get-auto-launch", () => ({
   enabled: app.getLoginItemSettings().openAtLogin,
   supported: !is.dev,
@@ -435,15 +305,11 @@ ipcMain.handle("get-auto-launch", () => ({
 ipcMain.handle("set-auto-launch", async (_event, enabled: boolean) => {
   if (is.dev) return;
   app.setLoginItemSettings({ openAtLogin: enabled, path: process.execPath });
-  // The operator has now made an explicit choice -- the on-by-default
-  // above must never override it again, whichever way they set it.
+  // Marks the default as already applied so it never overrides this explicit choice later.
   await writeAppSettings({ ...(await readAppSettings()), autoLaunchDefaultApplied: true });
 });
 
-// gotSingleInstanceLock is false only when app.quit() was already called
-// above (a second launch handing off to the first) -- whenReady would still
-// resolve before that quit takes effect, so guard here too rather than
-// spawn a second daemon and a window that's about to disappear anyway.
+// Guards against whenReady resolving before an already-called app.quit() (second-instance handoff) takes effect.
 if (gotSingleInstanceLock) {
   void app.whenReady().then(() => {
     createWindow();
@@ -456,11 +322,7 @@ if (gotSingleInstanceLock) {
   });
 }
 
-// Deferred quit: the first before-quit intercepts the close, waits for the
-// hardware-safe shutdown above to finish (or time out), then calls
-// app.quit() itself -- which re-fires this same event. shuttingDown is
-// already true by then, so the second pass falls through and the app
-// actually exits, instead of looping.
+// Deferred quit: intercepts close, waits for hardware-safe shutdown, then calls app.quit() itself, which re-fires this event -- shuttingDown guards against looping on that second pass.
 app.on("before-quit", (event) => {
   if (shuttingDown) return;
   event.preventDefault();

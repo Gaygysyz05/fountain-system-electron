@@ -19,9 +19,7 @@ const STATE_LABEL: Record<ZoneState, string> = {
   paused: "Paused",
   error: "Error",
 };
-// A solid badge, not the small 2px dot used in the sidebar/status bar --
-// this screen is what an operator watches during a live show, so the
-// state has to read at a glance from across the room, not just up close.
+// Solid badge (not the small sidebar dot) so state reads at a glance from across the room during a live show.
 const STATE_BADGE: Record<ZoneState, string> = {
   stopped: "bg-bg-surface3 text-text-secondary",
   connecting: "bg-warning text-white",
@@ -33,32 +31,20 @@ const STATE_BADGE: Record<ZoneState, string> = {
 
 type Tab = "controls" | "timeline";
 
-/**
- * Two views on the same transport: "Controls" is one independent card PER
- * ZONE -- a real fountain install is rarely just one zone, and the whole
- * point of separate zones is running them independently, so every zone
- * gets its own scenario picker and Play/Pause/Stop rather than sharing one
- * selector that only ever showed whichever zone you'd last clicked.
- * "Timeline" is the piano-roll player (ScenarioTimelinePlayer), which DOES
- * stay scoped to one zone at a time via the picker up top -- there's only
- * ever one detailed view worth looking at at once.
- */
+/** Two views: "Controls" gives every zone its own independent card (zones run independently); "Timeline" stays scoped to one zone via the picker up top. */
 export function PlaybackPanel(): JSX.Element {
   const zones = useConfigStore((s) => s.zones);
   const loadZones = useConfigStore((s) => s.loadZones);
   const scenarios = useScenariosStore((s) => s.scenarios);
   const loadScenarios = useScenariosStore((s) => s.loadScenarios);
 
-  // Only used by the Timeline tab -- Controls shows every zone at once and
-  // has no single "selected" one.
+  // Only used by the Timeline tab -- Controls has no single "selected" zone.
   const [timelineZoneId, setTimelineZoneId] = useState<number | null>(null);
   const [timelineScenarioId, setTimelineScenarioId] = useState<string>("");
   const [timelineLoop, setTimelineLoop] = useState(false);
   const [tab, setTab] = useState<Tab>("controls");
 
-  // Lifted out of ZoneControlCard (was local state there) so "Play All" can
-  // read every zone's current pick -- each zone's own selector still writes
-  // here, nothing changes about how picking a scenario per-zone feels.
+  // Lifted to this level (not local to each card) so "Play All" can read every zone's current pick.
   const [selectedScenarios, setSelectedScenarios] = useState<Record<number, string>>({});
 
   useEffect(() => {
@@ -70,10 +56,7 @@ export function PlaybackPanel(): JSX.Element {
     if (timelineZoneId === null && zones.length > 0) setTimelineZoneId(zones[0].zone_id);
   }, [zones, timelineZoneId]);
 
-  // Zone status carries the daemon's own `scenario_id` (what's ACTUALLY
-  // loaded/playing right now), not just this tab's local picks -- read here
-  // so the defaulting effects below can prefer it over "first in the list"
-  // when the HMI (re)connects mid-show and has no pick of its own yet.
+  // Daemon's live `scenario_id` (what's actually playing) so defaulting below can prefer it over "first in the list" on reconnect mid-show.
   const liveZones = useZonesStore((s) => s.zones);
 
   useEffect(() => {
@@ -84,12 +67,7 @@ export function PlaybackPanel(): JSX.Element {
     if (preferred) setTimelineScenarioId(preferred);
   }, [scenarios, timelineScenarioId, timelineZoneId, liveZones]);
 
-  // Default every zone to whatever the daemon says is actually loaded there
-  // right now, falling back to the first available scenario only if nothing
-  // is currently running -- same as before, just no longer blind to a show
-  // already in progress when this tab first mounts (e.g. HMI closed and
-  // reopened while a zone kept playing). Only ever fills in a zone that
-  // doesn't have a pick yet; never overwrites an operator's own selection.
+  // Defaults each zone to what the daemon reports as currently loaded (else first scenario); only fills unset zones, never overwrites an operator's pick.
   useEffect(() => {
     if (scenarios.length === 0 || zones.length === 0) return;
     setSelectedScenarios((prev) => {
@@ -111,12 +89,7 @@ export function PlaybackPanel(): JSX.Element {
   const timelineZone = zones.find((z) => z.zone_id === timelineZoneId) ?? null;
   const sendCommand = useConnectionStore((s) => s.sendCommand);
 
-  /** Starts every configured zone's currently-selected scenario at once --
-   * previously the only way to run more than one zone was clicking Play on
-   * each zone's card in turn, which a synced multi-zone show can't really
-   * tolerate (each zone's Play command lands at a slightly different
-   * moment). Skips a zone with nothing selected rather than failing the
-   * whole batch over it. */
+  /** Starts every zone's selected scenario together (a synced multi-zone show can't tolerate clicking Play on each card in turn); skips zones with nothing selected. */
   function playAllZones(): void {
     for (const zone of zones) {
       const scenarioId = selectedScenarios[zone.zone_id];
@@ -124,12 +97,7 @@ export function PlaybackPanel(): JSX.Element {
     }
   }
 
-  // Play All's obvious counterparts -- it shipped without them, which read
-  // as "you can start everything together but have to stop each zone by
-  // hand", the opposite of what a multi-zone show actually needs. PAUSE_ZONE/
-  // STOP_ZONE on a zone that isn't playing is a harmless no-op on the daemon
-  // side, so these just fire at every configured zone unconditionally
-  // rather than first checking each one's live state.
+  // PAUSE_ZONE/STOP_ZONE are no-ops on the daemon for a non-playing zone, so these fire unconditionally at every zone without checking live state.
   function pauseAllZones(): void {
     for (const zone of zones) void sendCommand({ command: "PAUSE_ZONE", zone_id: zone.zone_id });
   }
@@ -145,13 +113,7 @@ export function PlaybackPanel(): JSX.Element {
     void sendCommand({ command: "SET_LOOP", zone_id: timelineZoneId, enabled: next });
   }
 
-  // A stable reference (setSelectedScenarios itself never changes identity)
-  // so React.memo on ZoneControlCard below actually has something to work
-  // with -- an inline `(scenarioId) => ...` closure created fresh per card
-  // on every PlaybackPanel render would otherwise fail memo's prop
-  // comparison every time regardless, e.g. on every OTHER zone's status
-  // tick (this component reads the whole zonesStore.zones map via
-  // liveZones above, so any zone's transition re-renders it).
+  // Stable callback identity so React.memo on ZoneControlCard below isn't defeated by a fresh closure on every render (this component re-renders on any zone's status tick via liveZones).
   const handleSelectScenario = useCallback((zoneId: number, scenarioId: string) => {
     setSelectedScenarios((prev) => ({ ...prev, [zoneId]: scenarioId }));
   }, []);
@@ -251,22 +213,7 @@ export function PlaybackPanel(): JSX.Element {
   );
 }
 
-/** One zone's whole transport -- its own loop toggle, so it never fights
- * another zone's card for shared state, but scenario selection is lifted
- * to PlaybackPanel (selectedScenarioId/onSelectScenario) so "Play All"
- * there can see every zone's current pick. Rendered once per configured
- * zone in the Controls grid, every one independently playable at the same
- * time -- or all together via Play All.
- *
- * Wrapped in React.memo: PlaybackPanel re-renders on ANY zone's status
- * transition (it reads the whole zonesStore.zones map for its own
- * defaulting effects), which without this would re-render every OTHER
- * zone's card too even though this component's own useZonesStore selector
- * below is already correctly scoped to just its own zone_id. Only works
- * because `zone`/`scenarios` stay referentially stable across such a
- * re-render (separate stores, untouched by a zonesStore-only update) and
- * onSelectScenario is now a single stable callback from the parent rather
- * than a fresh per-card closure. */
+/** One zone's transport; scenario selection is lifted to PlaybackPanel so "Play All" can see every zone's pick. Wrapped in React.memo since the parent re-renders on any zone's status tick, which would otherwise re-render every other zone's card too. */
 const ZoneControlCard = memo(function ZoneControlCard({
   zone,
   scenarios,
@@ -282,13 +229,7 @@ const ZoneControlCard = memo(function ZoneControlCard({
 
   const zoneStatus = useZonesStore((s) => s.zones.get(zone.zone_id));
   const state = zoneStatus?.state ?? "stopped";
-  // Local optimistic copy, not the sole source of truth: the daemon now
-  // reports its own is_looping on every zone_status (see zonesStore.ts),
-  // which is what actually drove playback all along -- this card's toggle
-  // used to be a plain useState that only this window ever wrote to, so a
-  // second HMI window, or a reconnect mid-show, silently showed the wrong
-  // value. Synced below rather than read directly so a click still feels
-  // instant instead of waiting on the next tick's broadcast.
+  // Local optimistic copy synced to the daemon's is_looping (source of truth) so a second HMI window or reconnect mid-show doesn't show a stale value, while a click still feels instant.
   const reportedLooping = zoneStatus?.is_looping;
   const [loopEnabled, setLoopEnabled] = useState(reportedLooping ?? false);
   useEffect(() => {

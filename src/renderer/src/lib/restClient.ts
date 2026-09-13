@@ -3,10 +3,7 @@ import type { ScenarioFile } from "./scenario";
 
 export const DAEMON_HTTP_URL = "http://127.0.0.1:8765";
 
-/** FastAPI's HTTPException body is `{"detail": "..."}` -- surface that
- * instead of just the HTTP status, so e.g. an invalid scenario_id shows its
- * actual validation message instead of a bare "400 Bad Request". Falls back
- * to statusText if the body isn't JSON or has no `detail`. */
+/** Surfaces FastAPI's `{"detail": "..."}` message instead of a bare status (e.g. shows the actual validation error for an invalid scenario_id); falls back to statusText otherwise. */
 async function describeHttpError(res: Response): Promise<string> {
   try {
     const body = await res.json();
@@ -18,10 +15,7 @@ async function describeHttpError(res: Response): Promise<string> {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  // A scenario file changes every time it's saved, but nothing here tells
-  // the browser that -- the daemon sends no cache-control header, so a
-  // second GET for the same scenario_id could be served stale from cache
-  // instead of hitting the daemon again. Never cache config/scenario reads.
+  // Daemon sends no cache-control header, so without cache: "no-store" a second GET for the same scenario_id could return a stale cached response.
   const res = await fetch(`${DAEMON_HTTP_URL}${path}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`GET ${path} failed: ${await describeHttpError(res)}`);
   return res.json() as Promise<T>;
@@ -50,26 +44,16 @@ interface ScenarioFileWire {
   device_ids?: string[];
 }
 
-/**
- * Hardware/runtime mutations go through the WS command channel (see
- * connectionStore.sendCommand); everything here is either a stateless
- * lookup or plain CRUD on a scenario *file* -- saving a timeline has
- * nothing to do with live hardware state, so it stays on the REST side
- * rather than being shoehorned into a WS command.
- */
+/** Hardware/runtime mutations go through the WS channel (connectionStore.sendCommand); this is stateless lookups and scenario-file CRUD only, which has nothing to do with live hardware state. */
 export const restClient = {
   getDrivers: () => getJson<DriverDescriptorDto[]>("/drivers"),
   getZones: () => getJson<ZoneConfigDto[]>("/zones"),
   getScenarios: () => getJson<ScenarioDto[]>("/scenarios"),
 
-  /** Full content, exactly what saveScenario below writes -- GET/POST on the
-   * same resource. `device_ids` is optional on the wire: a scenario saved
-   * before that field existed (or edited by hand) simply has none, and the
-   * editor falls back to showing every zone device (see resolveDeviceIds). */
+  /** device_ids is optional on the wire -- scenarios saved before that field existed (or hand-edited) have none, and the editor falls back to showing every zone device (see resolveDeviceIds). */
   getScenarioFull: (scenarioId: string) => getJson<ScenarioFileWire>(`/scenarios/${encodeURIComponent(scenarioId)}`),
 
-  /** URL for GET /audio -- not fetched here, just built, so callers (the
-   * waveform decoder) can fetch().arrayBuffer() it directly. */
+  /** Builds the GET /audio URL without fetching it, so callers (the waveform decoder) can fetch().arrayBuffer() it directly. */
   audioUrl: (musicFile: string) => `${DAEMON_HTTP_URL}/audio?path=${encodeURIComponent(musicFile)}`,
 
   saveScenario: async (scenarioId: string, file: ScenarioFile): Promise<void> => {

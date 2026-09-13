@@ -1,12 +1,7 @@
 import { useEffect, useState } from "react";
 import { errorMessage } from "../../lib/errors";
 
-/**
- * This app's own preferences -- as opposed to the daemon's hardware config
- * (Devices tab) or a show's data (Timeline/Schedule). Currently just the
- * one toggle; laid out as a list of labeled rows so a second setting has
- * somewhere obvious to go rather than needing its own screen.
- */
+/** App's own preferences (not the daemon's hardware config or a show's data); a labeled-row list so future settings have a home. */
 export function SettingsPanel(): JSX.Element {
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-lg overflow-y-auto p-lg">
@@ -19,10 +14,7 @@ export function SettingsPanel(): JSX.Element {
 }
 
 function AutoLaunchSetting(): JSX.Element {
-  // null while the initial IPC round-trip is in flight -- the toggle stays
-  // disabled rather than guessing a starting position, since guessing
-  // wrong (even for a moment) could look like a click was silently
-  // ignored.
+  // null while the initial IPC round-trip is in flight, so the toggle stays disabled instead of guessing a starting position (a wrong guess could look like an ignored click).
   const [state, setState] = useState<{ enabled: boolean; supported: boolean } | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -38,15 +30,10 @@ function AutoLaunchSetting(): JSX.Element {
     setError(null);
     try {
       await window.electron.setAutoLaunch(next);
-      // Re-read rather than optimistically assuming `next` stuck -- Windows
-      // itself can refuse a login-item registration (Task Scheduler access
-      // denied under a locked-down account, say), and the toggle should
-      // reflect what's actually registered, not what was merely requested.
+      // Re-read rather than assuming `next` stuck -- Windows can refuse the login-item registration (e.g. Task Scheduler access denied).
       setState(await window.electron.getAutoLaunch());
     } catch (err) {
-      // window.electron.setAutoLaunch is an IPC call to the main process,
-      // not the daemon -- describeError's "can't reach the daemon"
-      // special-casing would be wrong here, hence the plain fallback.
+      // This is an IPC call to the main process, not the daemon, so describeError's daemon-unreachable special-casing wouldn't apply.
       setError(errorMessage(err));
     } finally {
       setPending(false);

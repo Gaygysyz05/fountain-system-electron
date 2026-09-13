@@ -17,12 +17,7 @@ function snap(t: number): number {
   return Math.round(t / SNAP) * SNAP;
 }
 
-/** Nearest span boundary on the OTHER side of `pivot` from every span
- * except `excludeIdx` -- the room a drag on this channel is allowed to
- * move into before it would start to overlap a neighbor. Two calls (one
- * per direction) bound every drag mode below; see commitChannelSpans in
- * timelineStore.ts for why staying overlap-free here means that action
- * never has to resolve a collision itself. */
+/** Bounds a drag to the room before it would overlap a neighboring span, so commitChannelSpans never has to resolve overlaps itself. */
 function roomBefore(spans: ToggleSpan[], excludeIdx: number | null, pivot: number): number {
   let bound = 0;
   spans.forEach((s, i) => {
@@ -49,30 +44,7 @@ interface DragState {
   liveEnd: number;
 }
 
-/**
- * Drag-to-paint editor for one binary field (valve "on", or eventually a
- * motor's "active") -- the piano-roll's editable counterpart, reusing its
- * exact visual language (ScenarioTimelinePlayer.tsx: same row height,
- * label width, ruler, green ON spans) so switching between the read-only
- * player and this editor doesn't feel like two different products.
- *
- * Exists specifically because the grid (DeviceTable) makes "open valve 5
- * for 3 seconds" cost one click per time-step between the two moments --
- * fine for precise, per-tick programming, painful for shaping a show by
- * feel across dozens of channels. This is deliberately an ADDITIONAL mode
- * (see DeviceTablePanel's Grid/Timeline toggle), not a replacement -- the
- * grid stays the default, and stays how it's always worked.
- *
- * Every drag is clamped against its channel's OWN neighboring spans in
- * real time (roomBefore/roomAfter) so two ON spans on the same device can
- * never overlap -- not detected-and-merged after the fact, prevented
- * during the drag itself, the same way trimming a clip against its
- * neighbor works in ordinary timeline-editing software. Drag tracking
- * uses window-level mousemove/mouseup (see handlePlayheadMouseDown in
- * ScenarioTimelinePlayer.tsx for the same pattern already established
- * there) so a fast drag that leaves the row, or the whole scrollable
- * area, is still tracked correctly.
- */
+/** Drag-to-paint editor for one binary field, matching ScenarioTimelinePlayer's visual language as an additional mode alongside the grid (not a replacement); drags are clamped in real time against sibling spans so ON spans on one channel can never overlap, using window-level mouse listeners so a fast drag stays tracked even off the row. */
 export function PianoRollEditor({
   category,
   field,
@@ -91,23 +63,11 @@ export function PianoRollEditor({
   const [selected, setSelected] = useState<{ deviceId: string; idx: number } | null>(null);
   const timelineWidth = duration * PX_PER_SECOND;
 
-  // Holds the in-flight drag's own listener-teardown, if any. A mouseup
-  // that lands outside the window (a fast drag off a multi-monitor setup,
-  // or released over another application) never reaches `window` at all --
-  // without this, that drag's mousemove/mouseup listeners stay attached
-  // forever, holding a stale closure over ITS OWN spans/anchorTime/idx.
-  // The next unrelated drag anywhere on this editor would then also
-  // trigger that zombie listener's mouseup handler, committing its stale
-  // snapshot of spans on top of whatever the new drag just did -- silent
-  // data corruption. beginDrag force-tears down any still-live previous
-  // drag before starting a new one, and the effect below does the same on
-  // unmount (e.g. switching back to Grid mode mid-drag).
+  // A mouseup landing outside the window never reaches us, so without this a stale drag's listeners stay attached and would commit corrupt data on top of the next drag; beginDrag and unmount both force-tear it down.
   const dragCleanupRef = useRef<(() => void) | null>(null);
   useEffect(() => () => dragCleanupRef.current?.(), []);
 
-  // One flat WireEvent[] pass suffices for every device's buildToggleSpans
-  // call below (it filters by device_id itself) -- avoids re-deriving a
-  // per-device map for what's normally a couple dozen events at most.
+  // Passed as-is to each device's buildToggleSpans call (it filters by device_id itself) rather than pre-splitting into a per-device map.
   const wireEvents = events as WireEvent[];
 
   const spansByDevice = useMemo(() => {
@@ -118,18 +78,9 @@ export function PianoRollEditor({
     return map;
   }, [devices, field, category, wireEvents, duration]);
 
-  // useCallback, not a plain function: onRowMouseDown/onSpanMouseDown
-  // below depend on it and are themselves memoized so PianoRollRow's
-  // React.memo has stable callback props to compare against -- see that
-  // component's own comment for why. Its OWN dependencies (spansByDevice,
-  // duration, commitChannelSpans, field) don't change mid-drag (spansByDevice
-  // is only rebuilt when file.events itself changes, which happens on
-  // commit, not on every mousemove), so this reference stays stable for
-  // the whole duration of a drag too.
+  // useCallback so PianoRollRow's React.memo sees stable callback props; its own deps stay stable mid-drag since spansByDevice only rebuilds when file.events changes (on commit, not on every mousemove).
   const beginDrag = useCallback((deviceId: string, mode: DragMode, idx: number, rowLeft: number, downClientX: number): void => {
-    // Force-close any drag left over from an off-window mouseup before
-    // this one attaches its own listeners -- see dragCleanupRef's comment.
-    dragCleanupRef.current?.();
+    dragCleanupRef.current?.(); // force-close any drag left over from an off-window mouseup (see dragCleanupRef)
 
     const spans = spansByDevice.get(deviceId) ?? [];
     const anchorTime = Math.max(0, Math.min(duration, (downClientX - rowLeft) / PX_PER_SECOND));
@@ -198,10 +149,7 @@ export function PianoRollEditor({
       commit(computeLive(ev.clientX));
       setDrag(null);
     };
-    // A mouseup that lands outside the window (see dragCleanupRef's
-    // comment above) never fires `onUp` -- `blur` is the reliable signal
-    // that the drag ended some other way, using the last position we DID
-    // see rather than an event with no clientX of its own.
+    // blur catches drags that end without a mouseup ever reaching the window, falling back to the last known position since blur carries no clientX.
     const onBlur = (): void => {
       cleanup();
       commit(computeLive(lastClientX));
@@ -293,18 +241,7 @@ export function PianoRollEditor({
   );
 }
 
-/**
- * One channel's row -- split out and memoized so a drag's per-mousemove
- * setDrag() (see beginDrag above) only re-renders the ONE row actually
- * being dragged, not all of them. Before this, every mousemove re-ran
- * PianoRollEditor's whole render function -- cheap per row individually,
- * but real, measurable wasted work across a 32-channel relay bank at
- * drag speed. Only works because the parent passes primitives derived
- * PER ROW (isDraggingRow, dragLiveStart, etc.) rather than the raw
- * `drag`/`selected` state objects -- passing those directly would still
- * give every row a "changed" prop on every tick regardless of whether it
- * was the one being dragged.
- */
+/** Memoized so a drag's per-mousemove setDrag only re-renders the dragged row; requires the parent to pass per-row primitives (isDraggingRow, dragLiveStart, etc.) rather than the raw drag/selected objects, or every row would see a changed prop each tick. */
 const PianoRollRow = memo(function PianoRollRow({
   device,
   rowIndex,

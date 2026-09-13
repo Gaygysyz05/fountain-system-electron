@@ -15,15 +15,7 @@ function buildColumns(category: DeviceType, devices: DeviceDto[]): DeviceColumn[
   }
 }
 
-/**
- * Splits one category (Valves/Motors/Light) into a sub-tab per driver
- * instance (physical board) when the scenario's selected devices span more
- * than one instance -- e.g. two 32-channel relay boards both categorized
- * "valve". Without this, both boards' channel 1 would sit side by side in
- * one table with nothing to tell them apart. When there's only one
- * instance (the common case), this renders straight through to
- * DeviceTablePanel with no extra tab level.
- */
+/** Splits a category into a sub-tab per driver instance only when devices span >1 instance, so identical channel numbers on different boards (e.g. two 32-ch relay boards) don't collide in one table. */
 export function DeviceCategoryTabs({
   category,
   devices,
@@ -42,12 +34,7 @@ export function DeviceCategoryTabs({
   }, [groupIds, selectedId]);
 
   const active = groups.find((g) => (g.instance?.instance_id ?? "__unassigned__") === selectedId) ?? groups[0] ?? null;
-  // Memoized, not rebuilt inline on every render: DeviceTable resets grid
-  // selection/in-progress edits whenever `columns` changes identity (see
-  // its own comment), so a fresh array here on every unrelated re-render
-  // of this component's ancestors -- e.g. a parent re-rendering for a
-  // reason that has nothing to do with which devices are in this table --
-  // used to wipe that state even though the actual columns were unchanged.
+  // Memoized: DeviceTable resets grid selection/in-progress edits whenever `columns` changes identity, so an unmemoized array would wipe that state on unrelated ancestor re-renders.
   const columns = useMemo(() => (active ? buildColumns(category, active.devices) : []), [category, active]);
 
   if (groups.length === 0 || !active) {

@@ -3,21 +3,10 @@ import { zonePositions } from "../../lib/livePosition";
 import { useLiveTick } from "../../lib/useLiveTick";
 import { useConnectionStore } from "../../store/connectionStore";
 
-/**
- * Scenario position as a fill bar. Same non-blocking pattern as
- * LiveTimecode.tsx -- reads `zonePositions` directly and writes the fill
- * width through a ref, no React state, even though this updates ~20 times a
- * second while a zone is playing. Driven by the shared rAF loop in
- * lib/useLiveTick.ts, not its own -- see that file's comment.
- */
+/** Writes the fill width through a ref instead of React state despite ~20Hz updates (same pattern as LiveTimecode.tsx), driven by the shared rAF loop in lib/useLiveTick.ts. */
 export function LiveProgressBar({ zoneId }: { zoneId: number }): JSX.Element {
   const fillRef = useRef<HTMLDivElement>(null);
-  // Connection status changes rarely (a handful of times per session, not
-  // 20Hz) -- fine as ordinary React state, unlike the position itself
-  // below. Without this, a dropped WS just freezes the bar at its last
-  // value with nothing telling the operator it's no longer live -- there's
-  // no interpolation here to drift, but a frozen bar looks identical to a
-  // genuinely stalled show.
+  // Ordinary React state is fine here (changes rarely, unlike position) -- without it, a dropped WS freezes the bar with no sign to the operator that it's stale.
   const connected = useConnectionStore((s) => s.status === "open");
 
   useLiveTick(() => {

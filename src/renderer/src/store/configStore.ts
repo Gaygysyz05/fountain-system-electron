@@ -11,10 +11,7 @@ interface ConfigStore {
   zones: ZoneConfigDto[];
   loading: boolean;
   error: string | null;
-  // Shared across the Sidebar and the Devices tab -- previously the Devices
-  // tab kept its own separate zone list + selection, duplicating the
-  // Sidebar's (same zones, side by side, picking one didn't affect the
-  // other). One selection, one place it lives.
+  // Shared across the Sidebar and the Devices tab so picking a zone in one affects both (previously each kept its own duplicate selection).
   selectedZoneId: number | null;
   selectZone: (zoneId: number | null) => void;
 
@@ -23,10 +20,7 @@ interface ConfigStore {
 
   renameZone: (zoneId: number, name: string | null) => Promise<void>;
   deleteZone: (zoneId: number) => Promise<void>;
-  /** Resolves with how many of the zone's driver instances ended up
-   * connected -- the button that calls this used to be pure
-   * fire-and-forget, with nothing telling the operator whether "Connect
-   * All" actually did anything until they noticed the dots on their own. */
+  /** Returns connected/total so the caller can report whether "Connect All" actually worked, rather than leaving the operator to notice the dots on their own. */
   connectZone: (zoneId: number) => Promise<{ connected: number; total: number }>;
 
   addDriverInstance: (zoneId: number, instanceId: string, driverType: string, config: Record<string, unknown>) => Promise<void>;
@@ -42,13 +36,7 @@ interface ConfigStore {
   removeDevice: (zoneId: number, deviceId: string) => Promise<void>;
 }
 
-/**
- * This is config-time state (add/remove a device, a handful of times per
- * setup session), not the high-frequency runtime state in zonesStore --
- * re-fetching GET /zones after every mutation is simple and correct here,
- * unlike the position/state stream, which genuinely needed the split
- * documented in zonesStore.ts / lib/livePosition.ts.
- */
+/** Config-time state (infrequent edits) -- refetching GET /zones after every mutation is fine here, unlike zonesStore's high-frequency position/state stream (see zonesStore.ts / lib/livePosition.ts). */
 export const useConfigStore = create<ConfigStore>((set, get) => ({
   drivers: [],
   zones: [],
@@ -74,8 +62,7 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
         zones,
         loading: false,
         error: null,
-        // First load only -- once an operator has picked a zone, a
-        // background refresh must not silently steal focus back to zone 1.
+        // First load only -- once an operator has picked a zone, a refresh must not silently steal focus back to zone 1.
         selectedZoneId: prev.selectedZoneId === null && zones.length > 0 ? zones[0].zone_id : prev.selectedZoneId,
       }));
     } catch (err) {
@@ -86,9 +73,7 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
   connectZone: async (zoneId) => {
     await useConnectionStore.getState().sendCommand({ command: "CONNECT_ZONE", zone_id: zoneId });
     await get().loadZones();
-    // get() here, not the `zones` a caller may have destructured earlier --
-    // that snapshot predates the loadZones() above and would report last
-    // attempt's result, not this one's.
+    // get() here, not a `zones` a caller may have destructured earlier -- that snapshot predates the loadZones() above.
     const instances = get().zones.find((z) => z.zone_id === zoneId)?.driver_instances ?? [];
     return { connected: instances.filter((i) => i.connected).length, total: instances.length };
   },
@@ -148,18 +133,7 @@ export const useConfigStore = create<ConfigStore>((set, get) => ({
   ),
 }));
 
-// Unlike zonesStore, this one has no event stream keeping it live -- it only
-// ever changes via an explicit fetch. Every screen that reads it already
-// fetches once on mount, but that snapshot goes stale exactly when it
-// matters most: a dropped/restarted daemon connection reconnecting while a
-// panel is already mounted (e.g. Devices tab open across a daemon restart)
-// left driver `connected` flags, device lists and global_brightness/speed
-// frozen at their pre-drop values with nothing to refresh them -- an
-// operator could see a driver instance shown "connected" that no longer is.
-// Refetch on every transition INTO "open" (first connect included -- a
-// harmless extra fetch alongside whichever panel's own mount-time load
-// happens to be racing it) keeps this resynced the same way zonesStore's
-// event stream keeps itself live.
+// Unlike zonesStore, this store has no event stream keeping it live, so a reconnect after a daemon drop would otherwise leave an already-mounted panel showing stale `connected` flags/device lists -- refetch on every transition into "open" to resync.
 let previousConnectionStatus: ConnectionStatus | null = null;
 const unsubscribeConfigStatus = daemonClient.onStatusChange((status) => {
   if (status === "open" && previousConnectionStatus !== null && previousConnectionStatus !== "open") {
@@ -169,9 +143,7 @@ const unsubscribeConfigStatus = daemonClient.onStatusChange((status) => {
   previousConnectionStatus = status;
 });
 
-// See zonesStore.ts's matching comment -- daemonClient outlives this
-// module's own dev-mode HMR lifecycle, so a reload without this would
-// stack one more duplicate refetch-on-reconnect listener on every edit.
+// See zonesStore.ts's matching comment -- daemonClient outlives this module's dev-mode HMR lifecycle, so this dispose prevents stacking a duplicate listener on every edit.
 if (import.meta.hot) {
   import.meta.hot.dispose(() => unsubscribeConfigStatus());
 }

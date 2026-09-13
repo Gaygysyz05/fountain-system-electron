@@ -2,33 +2,14 @@ import { useRef, useState } from "react";
 import { describeError } from "../../lib/errors";
 import { useConnectionStore } from "../../store/connectionStore";
 
-/**
- * Always reachable, regardless of which tab is open -- this is why it lives
- * in AppShell's header rather than inside PlaybackPanel. Sends
- * EMERGENCY_STOP with zone_id omitted, which the daemon treats as "every
- * zone" (see main.py's _dispatch).
- *
- * The visible state is driven entirely by the actual command outcome, not a
- * timer: this used to flash "STOPPED" on a bare setTimeout regardless of
- * whether the command was ever sent (e.g. the socket was reconnecting) or
- * came back Ack(ok=false). That silently told the operator the fountain was
- * off exactly when it might not be -- the one thing this button must never
- * do. "STOPPED" now only ever shows once the daemon has actually
- * acknowledged the command; a dropped connection, a rejected command, or a
- * timeout shows a persistent failure state instead, with the reason in the
- * tooltip. A second click always fires another attempt regardless of the
- * current phase -- this must never require waiting out a pending one.
- */
+/** Lives in AppShell's header, not PlaybackPanel, so it stays reachable from every tab; sends EMERGENCY_STOP with zone_id omitted (daemon treats that as "every zone"); "STOPPED" only shows after a real daemon ack -- never a timer -- since falsely showing "stopped" is the one failure this button must never have. */
 type Phase = "idle" | "sending" | "confirmed" | "failed";
 
 export function EmergencyStopButton(): JSX.Element {
   const sendCommand = useConnectionStore((s) => s.sendCommand);
   const [phase, setPhase] = useState<Phase>("idle");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  // Bumped on every click so a late-resolving older attempt can't clobber a
-  // newer one's result (e.g. click while "sending", the first attempt's ack
-  // arrives after the second's) -- only the most recent attempt is allowed
-  // to update the visible phase.
+  // Bumped on every click so a late-resolving older attempt can't clobber a newer one's result -- only the most recent attempt may update the visible phase.
   const attemptRef = useRef(0);
 
   function handleClick(): void {

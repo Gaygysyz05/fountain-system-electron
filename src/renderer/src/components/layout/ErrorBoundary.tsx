@@ -9,20 +9,7 @@ interface State {
   info: ErrorInfo | null;
 }
 
-/**
- * Without this, any uncaught render error unmounts everything inside it --
- * exactly the blank-screen symptom hit while testing scene/cue changes.
- * React error boundaries must be class components (no hook equivalent
- * exists yet), and must wrap the crash-prone tree from OUTSIDE -- an error
- * boundary can't catch an error thrown by its own children if it's the
- * thing crashing. Used at two levels (see App.tsx and AppShell.tsx): a root
- * one as the last resort, and one scoped to just the active tab's content
- * so a crash there can't take the header/Emergency Stop/StatusBar down with
- * it. `h-full`, not `h-screen`, so the fallback fits whichever of those two
- * containers it's rendering into instead of always claiming the full
- * viewport. Shows the actual error + component stack so a crash is
- * diagnosable from a screenshot instead of just "the screen is empty."
- */
+/** Must be a class component (no hook equivalent for error boundaries) and must wrap the crash-prone tree from outside, since it can't catch an error thrown by its own children; `h-full` (not `h-screen`) lets the fallback fit whichever container it's rendering into. */
 export class ErrorBoundary extends Component<Props, State> {
   state: State = { error: null, info: null };
 

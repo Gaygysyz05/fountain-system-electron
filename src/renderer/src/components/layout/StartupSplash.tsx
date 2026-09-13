@@ -1,16 +1,7 @@
 import { useDaemonStatusStore } from "../../store/daemonStatusStore";
 import { startupMessage } from "../../lib/startupMessage";
 
-/**
- * Full-screen "starting up" cover shown only for the very first connection
- * of the session -- replaces the previously-blank "Zones: 0 Devices: 0"
- * look during that window with something that actually says what's
- * happening. Rendered as an overlay ON TOP of AppShell rather than
- * instead of it, so every panel underneath (zones, scenarios, schedule)
- * is already mounted and loading in the background the moment the daemon
- * answers -- the interface is instantly populated the moment this splash
- * disappears, not starting its own fetches from zero at that point.
- */
+// Overlays AppShell rather than replacing it, so panels underneath are already mounted and loading by the time this splash disappears.
 export function StartupSplash(): JSX.Element {
   const daemonStatus = useDaemonStatusStore((s) => s.status);
 
