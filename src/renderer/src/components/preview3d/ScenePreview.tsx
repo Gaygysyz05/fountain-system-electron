@@ -7,38 +7,20 @@ import * as THREE from "three";
 import { errorMessage } from "../../lib/errors";
 import { useConfigStore } from "../../store/configStore";
 
-// Served from src/renderer/public/models/ -- electron-vite copies `public/`
-// verbatim into out/renderer/ at build time and this app's Vite base is
-// relative (see index.html's built <script src="./assets/...">, needed
-// because a packaged build loads via file://, which has no notion of a
-// server root an absolute "/models/..." path could resolve against).
-const MODEL_URL = "./models/fontan.glb";
+// Relative path is required: a packaged build loads via file://, which has no server root for an absolute "/models/..." path to resolve against.
+const MODEL_URL = "./models/fountain.gltf";
 
-// The source file's own scale/units are whatever the 3D artist modeled
-// in -- centimeters, a 1-unit-per-meter rig, whatever. Rather than hardcode
-// a scale factor that only happens to look right for this one file,
-// FountainModel measures the loaded geometry's own bounding box and
-// normalizes it to a fixed target size, so the preview frames correctly
-// regardless of what the .glb turns out to actually contain.
+// Target size the model's bounding box is normalized to, regardless of the model's own modeled units/scale.
 const TARGET_SIZE = 6;
 
-/** Where each zone's label sits in the grid -- centralized so a future
- * per-fountain geometry (see this module's own history) can reuse the same
- * layout instead of re-deriving it. */
+/** Zone label grid position, centralized so future per-fountain geometry can reuse this layout. */
 function gridPosition(index: number): [number, number, number] {
   const col = index % 4;
   const row = Math.floor(index / 4);
   return [col * 1.8 - 2.7, 0, row * 1.8];
 }
 
-/**
- * Hand-rolled instead of @react-three/drei's <OrbitControls> -- drei is a
- * kitchen-sink package; pulling it in for this one helper also drags in
- * ~14MB of unrelated transitive deps (mediapipe hand-tracking, hls.js video
- * streaming) that this app has no use for. This is the same ~15-line wiring
- * drei's own OrbitControls does internally: instantiate against the R3F
- * camera/canvas, update it every frame, dispose on unmount.
- */
+/** Hand-rolled instead of @react-three/drei's <OrbitControls> to avoid drei's ~14MB of unrelated transitive deps (mediapipe, hls.js). */
 function CameraControls(): null {
   const { camera, gl } = useThree();
   const controlsRef = useRef<OrbitControls | null>(null);
@@ -54,29 +36,13 @@ function CameraControls(): null {
     };
   }, [camera, gl]);
 
-  // Damping needs an explicit update() every frame to animate; without it
-  // the camera would only move on pointer events.
+  // Damping needs an explicit update() every frame; without it the camera only moves on pointer events.
   useFrame(() => controlsRef.current?.update());
 
   return null;
 }
 
-/**
- * A metal/plastic nozzle material (glTF's default PBR shading model,
- * MeshStandardMaterial) gets almost none of its visible color from direct
- * lighting -- a metallic or low-roughness surface is lit mainly by
- * REFLECTING its surroundings, not by diffusing light back like the
- * concrete basin does. With no environment to reflect (this scene had
- * none at all before), those parts render essentially black regardless of
- * how many directional lights are added -- adding more direct light doesn't
- * fix a reflection problem. RoomEnvironment is three's own built-in stand-in
- * for a real HDRI: a small generic room baked into a reflection (PMREM) map
- * via the GPU, giving metallic/glossy surfaces something plausible to
- * reflect without shipping or loading an actual environment image. Same
- * "import straight from three/examples/jsm, not drei" reasoning as
- * CameraControls above (drei's <Environment preset="..."/> does exactly
- * this, at the cost of the same dependency this app avoids).
- */
+/** Metallic/glossy surfaces (glTF's default PBR) are lit mainly by reflection and render black with no environment to reflect; RoomEnvironment bakes a generic stand-in via PMREM instead of shipping a real HDRI. */
 function SceneEnvironment(): null {
   const { gl, scene } = useThree();
 
@@ -84,12 +50,7 @@ function SceneEnvironment(): null {
     const pmremGenerator = new THREE.PMREMGenerator(gl);
     const envTexture = pmremGenerator.fromScene(new RoomEnvironment(), 0.04).texture;
     scene.environment = envTexture;
-    // RoomEnvironment is deliberately bright (its whole job is giving a
-    // metallic surface something strong enough to reflect) -- at full
-    // strength its diffuse (IBL) contribution washes out the concrete and
-    // water too, not just the nozzles it was added for. environmentIntensity
-    // scales just the environment's contribution, independent of the
-    // directional/ambient lights actually lighting the rest of the scene.
+    // RoomEnvironment is deliberately bright and at full strength washes out non-metallic surfaces too; environmentIntensity scales only its contribution, independent of the other lights.
     scene.environmentIntensity = 0.35;
     return () => {
       scene.environment = null;
@@ -101,14 +62,7 @@ function SceneEnvironment(): null {
   return null;
 }
 
-/**
- * Loads fontan.glb once, centers and normalizes it, and plays back
- * whatever animations (if any) it was exported with -- a rotating pump
- * impeller, a jet's own bob, whatever the 3D artist baked in. Same
- * manual-loader approach as CameraControls above (GLTFLoader straight from
- * three/examples/jsm, not drei's <useGLTF>) for the same reason: this app
- * deliberately doesn't pull in drei.
- */
+/** Loads the fountain model once, centers/normalizes it, and plays any baked-in animations; uses GLTFLoader directly rather than drei's useGLTF for the same reason as CameraControls. */
 function FountainModel({ onError }: { onError: (message: string) => void }): JSX.Element | null {
   const [model, setModel] = useState<THREE.Group | null>(null);
   const mixerRef = useRef<THREE.AnimationMixer | null>(null);
@@ -129,13 +83,7 @@ function FountainModel({ onError }: { onError: (message: string) => void }): JSX
         const largestDimension = Math.max(size.x, size.y, size.z) || 1;
         const scale = TARGET_SIZE / largestDimension;
 
-        // Object3D applies scale before translation (world = position + scale
-        // * localVertex), so the position needed to land a given LOCAL point
-        // at a specific WORLD coordinate is always -localPoint * scale, not
-        // the unscaled offset -- X/Z center on the origin, Y sits the
-        // model's own lowest point on the ground plane (y=0) instead of on
-        // its vertical bounding-box middle, so it stands ON the grid rather
-        // than floating through it.
+        // Position must be -localPoint * scale (scale applies before translation): centers X/Z on the origin and grounds Y at the model's lowest point (y=0) rather than its bbox middle.
         scene.scale.setScalar(scale);
         scene.position.set(-center.x * scale, -box.min.y * scale, -center.z * scale);
 
@@ -149,9 +97,7 @@ function FountainModel({ onError }: { onError: (message: string) => void }): JSX
       },
       undefined,
       (err) => {
-        // A GLTFLoader failure loading the bundled model file, not a
-        // daemon call -- describeError's "can't reach the daemon" message
-        // would be wrong here even if this happened to be a TypeError.
+        // Not a daemon call, so describeError's "can't reach the daemon" wording would be wrong here.
         if (!cancelled) onError(errorMessage(err));
       },
     );
@@ -169,17 +115,7 @@ function FountainModel({ onError }: { onError: (message: string) => void }): JSX
   return model ? <primitive object={model} /> : null;
 }
 
-/**
- * Renders the real fountain model (fontan.glb, see FountainModel above)
- * instead of the abstract boxes-as-zones placeholder this used to be (see
- * git history) -- an operator previewing a show now sees the actual
- * installation, not an empty stage with position markers. Zone labels keep
- * their existing grid layout for now: the model is one static mesh with no
- * per-zone parts this app can identify, so there's no real geometry yet to
- * anchor a label to a specific physical zone. Zone existence still comes
- * from configStore (what's actually configured on the daemon), not
- * zonesStore -- see Sidebar.tsx's same fix.
- */
+/** Zone labels keep the grid layout since the model has no identifiable per-zone parts to anchor to; zone list comes from configStore (daemon-configured), not zonesStore -- see Sidebar.tsx. */
 export function ScenePreview(): JSX.Element {
   const configuredZones = useConfigStore((s) => s.zones);
   const loadZones = useConfigStore((s) => s.loadZones);
@@ -236,21 +172,14 @@ export function ScenePreview(): JSX.Element {
 
       {modelError && (
         <div className="pointer-events-none absolute bottom-md left-1/2 -translate-x-1/2 rounded-control border border-danger bg-bg-surface1 px-md py-xs text-xs text-danger">
-          Couldn't load fontan.glb: {modelError}
+          Couldn't load fountain.gltf: {modelError}
         </div>
       )}
     </div>
   );
 }
 
-/**
- * Projects each zone's grid position to screen space every frame and writes
- * straight into the label `<div>`'s style through a ref -- no React state,
- * even though the camera (and therefore every label's screen position)
- * moves continuously while orbiting. No @react-three/drei <Html> (see
- * CameraControls' docstring for why this app avoids drei): a label is just
- * a projected 2D position, not worth a whole dependency.
- */
+/** Writes projected screen position straight into each label div's style via ref, bypassing React state since this runs every frame during orbit. */
 function ZoneLabelSync({
   zoneEntries,
   labelRefs,
